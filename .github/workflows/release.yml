@@ -1,0 +1,201 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0)"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: claude-quota-bar
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+            ext: tar.gz
+            use_zigbuild: false
+          - target: x86_64-apple-darwin
+            os: macos-13
+            ext: tar.gz
+            use_zigbuild: false
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            ext: tar.gz
+            use_zigbuild: false
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+            ext: tar.gz
+            use_zigbuild: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04
+            ext: tar.gz
+            use_zigbuild: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-22.04
+            ext: tar.gz
+            use_zigbuild: true
+          - target: x86_64-pc-windows-gnu
+            os: ubuntu-22.04
+            ext: zip
+            use_zigbuild: false
+            mingw: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install MinGW (Windows cross)
+        if: matrix.mingw
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Install cargo-zigbuild (cross-compile via Zig)
+        if: matrix.use_zigbuild
+        uses: korandoru/setup-zig@v1
+        with:
+          zig-version: "0.13.0"
+
+      - name: Install cargo-zigbuild binary
+        if: matrix.use_zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build (zigbuild)
+        if: matrix.use_zigbuild
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: ${{ !matrix.use_zigbuild }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package (Unix)
+        if: matrix.ext == 'tar.gz'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          bin="target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+          # Strip symbols where the target toolchain supports it.
+          if command -v llvm-strip >/dev/null 2>&1 && [[ "${{ matrix.target }}" == *darwin* ]]; then
+            llvm-strip "$bin" || true
+          elif [[ "${{ matrix.target }}" == *linux* ]] && ! [[ "${{ matrix.target }}" == aarch64-* ]]; then
+            strip "$bin" || true
+          fi
+          name="${{ env.BINARY_NAME }}-${{ matrix.target }}"
+          tar -czf "dist/${name}.tar.gz" -C "$(dirname "$bin")" "$(basename "$bin")"
+          ls -lh dist/
+
+      - name: Package (Windows)
+        if: matrix.ext == 'zip'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          bin="target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}.exe"
+          name="${{ env.BINARY_NAME }}-${{ matrix.target }}"
+          (cd "$(dirname "$bin")" && zip "${{ github.workspace }}/dist/${name}.zip" "$(basename "$bin")")
+          ls -lh dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish-github-release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} release-assets/ \;
+          ls -lh release-assets/
+
+      - name: Generate changelog (git-cliff)
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: CHANGELOG_LATEST.md
+
+      - name: Resolve tag name
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          body_path: CHANGELOG_LATEST.md
+          files: release-assets/*
+          draft: false
+          prerelease: false
+
+  publish-npm:
+    name: Publish to NPM
+    needs: publish-github-release
+    runs-on: ubuntu-latest
+    if: ${{ !github.event.repository.fork }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Publish platform + umbrella packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "NPM_TOKEN secret not set — skipping NPM publish."
+            exit 0
+          fi
+          node npm/scripts/prepare-packages.js

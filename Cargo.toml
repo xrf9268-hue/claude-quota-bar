@@ -1,0 +1,38 @@
+[package]
+name = "claude-quota-bar"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+authors = ["yvan <yvan.yang@outlook.com>"]
+description = "Fast Rust statusline for Claude Code — battery-bar 5h/7d quota, ctx, cache age, git"
+repository = "https://github.com/xrf9268-hue/claude-quota-bar"
+readme = "README.md"
+keywords = ["claude", "statusline", "cli", "terminal"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "claude-quota-bar"
+path = "src/main.rs"
+
+[lib]
+name = "claude_quota_bar"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[dev-dependencies]
+insta = { version = "1", features = ["json"] }
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

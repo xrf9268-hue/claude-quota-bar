@@ -1,0 +1,11 @@
+{
+  "name": "claude-quota-bar-linux-x64",
+  "version": "0.1.0",
+  "description": "Native binary for claude-quota-bar (Linux x64 glibc)",
+  "license": "MIT",
+  "repository": "git+https://github.com/xrf9268-hue/claude-quota-bar.git",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "libc": ["glibc"],
+  "files": ["bin/"]
+}

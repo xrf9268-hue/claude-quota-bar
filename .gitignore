@@ -1,0 +1,12 @@
+/target
+/Cargo.lock.bak
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+node_modules/
+npm-publish/
+# Cache dir created by test runs that use the project as $HOME.
+/.cache/
+

@@ -1,0 +1,31 @@
+{
+  "name": "claude-quota-bar",
+  "version": "0.1.0",
+  "description": "Fast Rust statusline for Claude Code — battery-bar 5h/7d quota, ctx, cache age, git",
+  "keywords": ["claude", "statusline", "cli", "terminal", "anthropic"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xrf9268-hue/claude-quota-bar.git"
+  },
+  "homepage": "https://github.com/xrf9268-hue/claude-quota-bar",
+  "bugs": {
+    "url": "https://github.com/xrf9268-hue/claude-quota-bar/issues"
+  },
+  "bin": {
+    "claude-quota-bar": "./bin.js"
+  },
+  "files": ["bin.js", "README.md"],
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {
+    "claude-quota-bar-darwin-arm64": "0.1.0",
+    "claude-quota-bar-darwin-x64": "0.1.0",
+    "claude-quota-bar-linux-x64": "0.1.0",
+    "claude-quota-bar-linux-x64-musl": "0.1.0",
+    "claude-quota-bar-linux-arm64": "0.1.0",
+    "claude-quota-bar-linux-arm64-musl": "0.1.0",
+    "claude-quota-bar-win32-x64": "0.1.0"
+  }
+}

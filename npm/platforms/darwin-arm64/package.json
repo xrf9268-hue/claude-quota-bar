@@ -1,0 +1,10 @@
+{
+  "name": "claude-quota-bar-darwin-arm64",
+  "version": "0.1.0",
+  "description": "Native binary for claude-quota-bar (macOS arm64)",
+  "license": "MIT",
+  "repository": "git+https://github.com/xrf9268-hue/claude-quota-bar.git",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": ["bin/"]
+}
