@@ -175,15 +175,23 @@ jobs:
     needs: publish-github-release
     runs-on: ubuntu-latest
     if: ${{ !github.event.repository.fork }}
+    # OIDC: GitHub Actions mints a short-lived token that npm exchanges
+    # for publish access via Trusted Publishing — no long-lived NPM_TOKEN
+    # stored in repo secrets.
     permissions:
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # npm CLI ≥ 11.5 is required for OIDC trusted publishing.
+          node-version: "22"
           registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm to a version that supports OIDC
+        run: npm install -g npm@latest
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -191,11 +199,4 @@ jobs:
           path: artifacts/
 
       - name: Publish platform + umbrella packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "NPM_TOKEN secret not set — skipping NPM publish."
-            exit 0
-          fi
-          node npm/scripts/prepare-packages.js
+        run: node npm/scripts/prepare-packages.js
