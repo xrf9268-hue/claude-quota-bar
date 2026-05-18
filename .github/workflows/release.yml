@@ -190,12 +190,11 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          # npm CLI ≥ 11.5 is required for OIDC trusted publishing.
-          node-version: "22"
+          # Node 24 ships with npm 11+; OIDC trusted publishing needs ≥ 11.5.
+          # We avoid `npm install -g npm@latest` because in-place npm upgrades
+          # sometimes break transitive deps (e.g. `promise-retry` not found).
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
-
-      - name: Upgrade npm to a version that supports OIDC
-        run: npm install -g npm@latest
 
       - name: Download all artifacts
         uses: actions/download-artifact@v5
