@@ -9,7 +9,14 @@
 
 use serde::Deserialize;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
+
+/// Per-line read cap. Tool-result payloads can carry multi-MB base64 blobs
+/// (screenshots, attachments); without a cap, `BufRead::read_line` grows
+/// the line buffer to the full size and stalls the statusline render with
+/// a multi-MB synchronous allocation. 1 MB is far above every realistic
+/// `usage` line and still bounds the worst case.
+const MAX_LINE_BYTES: u64 = 1 << 20;
 
 #[derive(Debug, Deserialize, Default)]
 struct TranscriptLine {
@@ -43,15 +50,39 @@ struct Usage {
 /// "no data captured yet", not "context usage is genuinely zero".
 pub fn last_usage_tokens(path: &str) -> Option<u64> {
     let file = File::open(path).ok()?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut last: Option<u64> = None;
-    // Skip-and-continue on per-line decode errors: a single bad-UTF-8 row
-    // shouldn't truncate the scan and silently lose a later valid line.
-    // (Written as `let-else` rather than `lines().filter_map(Result::ok)`
-    // to make the error-swallowing explicit — clippy lints the latter.)
-    for line in reader.lines() {
-        let Ok(line) = line else { continue };
-        let Ok(parsed) = serde_json::from_str::<TranscriptLine>(&line) else {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        buf.clear();
+        // `take(MAX + 1)` caps the per-line read; if the line is larger,
+        // `read_until` stops short of `\n` and we discard the rest in
+        // bounded chunks. This protects the statusline from multi-MB
+        // tool-result payloads (e.g. base64 screenshots).
+        let n = {
+            let mut limited = reader.by_ref().take(MAX_LINE_BYTES + 1);
+            limited.read_until(b'\n', &mut buf).unwrap_or(0)
+        };
+        if n == 0 {
+            break;
+        }
+        let complete = buf.last() == Some(&b'\n');
+        if !complete {
+            // Oversized line — drain to next `\n` (or EOF) without
+            // accumulating, then skip this record.
+            skip_to_newline(&mut reader);
+            continue;
+        }
+        buf.pop(); // strip the `\n`
+        // Skip-and-continue on per-line decode errors: a single bad-UTF-8
+        // row shouldn't truncate the scan and silently lose a later valid
+        // line. Written explicitly with `let-else` rather than
+        // `lines().filter_map(Result::ok)` so the error-swallowing is
+        // visible at the call site (clippy lints the latter).
+        let Ok(line) = std::str::from_utf8(&buf) else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<TranscriptLine>(line) else {
             continue;
         };
         if parsed.is_sidechain || parsed.is_api_error_message {
@@ -72,6 +103,22 @@ pub fn last_usage_tokens(path: &str) -> Option<u64> {
         }
     }
     last
+}
+
+/// Advance the reader past the next `\n` (or EOF) without buffering the
+/// skipped bytes. Used to discard the tail of an oversized line.
+fn skip_to_newline(reader: &mut impl BufRead) {
+    let mut scratch: Vec<u8> = Vec::with_capacity(4096);
+    loop {
+        scratch.clear();
+        let n = {
+            let mut chunk = reader.by_ref().take(4096);
+            chunk.read_until(b'\n', &mut scratch).unwrap_or(0)
+        };
+        if n == 0 || scratch.last() == Some(&b'\n') {
+            break;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -124,6 +171,30 @@ mod tests {
     fn empty_file_returns_none() {
         let f = write_jsonl(&[]);
         assert_eq!(last_usage_tokens(f.path().to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn oversized_line_is_skipped_without_blocking_later_lines() {
+        // A single JSONL line carrying a large base64 tool_result blob can
+        // be tens of MB on the wire. We refuse to allocate it into RAM —
+        // skip past it and keep scanning. The post-oversize valid line
+        // must still be picked up.
+        let mut f = NamedTempFile::new().unwrap();
+        let valid_first = br#"{"message":{"usage":{"input_tokens":11,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        f.write_all(valid_first).unwrap();
+        f.write_all(b"\n").unwrap();
+        // Build an oversized but well-formed JSON line.
+        f.write_all(br#"{"junk":""#).unwrap();
+        let chunk = vec![b'a'; 64 * 1024];
+        for _ in 0..40 {
+            f.write_all(&chunk).unwrap(); // ~2.5 MB blob — exceeds the 1 MB cap.
+        }
+        f.write_all(br#""}"#).unwrap();
+        f.write_all(b"\n").unwrap();
+        let valid_last = br#"{"message":{"usage":{"input_tokens":777,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        f.write_all(valid_last).unwrap();
+        f.write_all(b"\n").unwrap();
+        assert_eq!(last_usage_tokens(f.path().to_str().unwrap()), Some(777));
     }
 
     #[test]
