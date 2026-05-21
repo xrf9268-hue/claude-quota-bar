@@ -53,9 +53,6 @@ Don't write production code without a failing test first.
   strings, not escapes, when color is off.
 - Battery bar (`progress::battery_bar`) batches consecutive cells of the same
   background. Don't regress that — per-cell escapes blow up the output 10×.
-- Bar text uses two fg colors (`text_on_filled` dark, `text_on_empty` light)
-  so the percentage stays readable on both the light severity bgs and the
-  dark gutter. A single fg fails WCAG contrast on at least one of them.
 - Severity thresholds (`theme::WARN_THRESHOLD = 30.0`, `HOT_THRESHOLD = 70.0`)
   are global. Don't add a config knob without a real user need.
 
@@ -81,7 +78,15 @@ These are the load-bearing decisions that aren't obvious from reading code:
    `main::main` swallows errors to stderr. Claude Code reads stdout — a crash
    shows up as a blank statusline (annoying) instead of a panic (broken).
 
-5. **Context-token precedence** in `render::build_model`:
+5. **Bar text must use two fg colors.** `text_on_filled` (dark) overlaid on
+   the light severity cells, `text_on_empty` (light) overlaid on the dark
+   gutter. Collapsing to a single fg fails WCAG contrast on one of the two
+   backgrounds and renders the percentage text near-invisible (the prior
+   warn-state ratio was 1.6 : 1). The regression is caught by
+   `partial_bar_uses_dark_text_on_filled_and_light_text_on_empty` in
+   `progress.rs`.
+
+6. **Context-token precedence** in `render::build_model`:
    `Context.transcript_tokens` (from `main.rs` reading the JSONL) → stdin
    `total_input_tokens` → 20k baseline. Stdin under-counts by ~10–15k
    (anthropics/claude-code#22955). Don't add `total_output_tokens` to the
