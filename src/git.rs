@@ -168,9 +168,9 @@ fn parse_status(out: &str) -> Option<GitInfo> {
 /// Extract the displayable path from a porcelain v1 row (`XY path`).
 ///
 /// - For rename (`R`) and copy (`C`) status codes in the index slot, the
-///   payload is `old -> new`; the separator is the FIRST ` -> ` on the
-///   row (a destination filename may itself contain ` -> `). We surface
-///   the destination, which is everything after that first separator.
+///   payload is `old -> new`. If the source is C-quoted, skip past its
+///   closing quote before looking for the separator — otherwise a ` -> `
+///   inside the quoted source name would be mistaken for the separator.
 /// - For all other codes a literal ` -> ` is part of the filename and must
 ///   be preserved.
 /// - Git wraps paths containing unusual characters in C-style double
@@ -185,7 +185,7 @@ fn extract_dirty_path(line: &str) -> Option<String> {
     let x = bytes[0] as char;
     let raw = line.get(3..)?;
     let path = if matches!(x, 'R' | 'C') {
-        raw.split_once(" -> ").map(|(_, dest)| dest).unwrap_or(raw)
+        rename_destination(raw).unwrap_or(raw)
     } else {
         raw
     };
@@ -194,6 +194,34 @@ fn extract_dirty_path(line: &str) -> Option<String> {
         .and_then(|s| s.strip_suffix('"'))
         .unwrap_or(path);
     Some(cleaned.to_string())
+}
+
+/// Find the destination half of an `old -> new` rename payload, handling
+/// a C-quoted source whose contents may include a literal ` -> `.
+fn rename_destination(raw: &str) -> Option<&str> {
+    // Skip past the source. If it's C-quoted, advance to the byte after
+    // its closing quote (respecting `\\` and `\"` escapes); otherwise
+    // search from the start.
+    let search_from = if raw.starts_with('"') {
+        let bytes = raw.as_bytes();
+        let mut i = 1;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' if i + 1 < bytes.len() => i += 2,
+                b'"' => {
+                    i += 1;
+                    break;
+                }
+                _ => i += 1,
+            }
+        }
+        i
+    } else {
+        0
+    };
+    raw.get(search_from..)?
+        .split_once(" -> ")
+        .map(|(_, dest)| dest)
 }
 
 /// Run a command with a wall-clock timeout. On timeout we kill the child
@@ -280,6 +308,18 @@ mod tests {
         let info = parse_status(s).unwrap();
         assert_eq!(info.dirty_count, 1);
         assert_eq!(info.dirty_file.as_deref(), Some("new -> name.txt"));
+    }
+
+    #[test]
+    fn parse_rename_quoted_source_containing_arrow() {
+        // Codex-flagged corner: when the SOURCE is C-quoted (e.g. because
+        // it also has a non-ASCII byte) and the source name happens to
+        // contain a literal ` -> `, a naive `split_once(" -> ")` splits
+        // inside the quoted source and corrupts the destination.
+        let s = "## main...origin/main\nR  \"old -> name.txt\" -> new.txt\n";
+        let info = parse_status(s).unwrap();
+        assert_eq!(info.dirty_count, 1);
+        assert_eq!(info.dirty_file.as_deref(), Some("new.txt"));
     }
 
     #[test]
