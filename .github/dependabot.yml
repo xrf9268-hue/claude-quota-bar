@@ -1,0 +1,14 @@
+# Keep GitHub Actions used by ci.yml + release.yml current.
+# Cargo deps are intentionally not tracked here — AGENTS.md caps runtime
+# deps at 3 (serde, serde_json, anyhow); bumps go through review by hand.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
