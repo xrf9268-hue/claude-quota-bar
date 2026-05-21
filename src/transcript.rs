@@ -9,14 +9,14 @@
 
 use serde::Deserialize;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{Read, Seek, SeekFrom};
 
-/// Per-line read cap. Tool-result payloads can carry multi-MB base64 blobs
-/// (screenshots, attachments); without a cap, `BufRead::read_line` grows
-/// the line buffer to the full size and stalls the statusline render with
-/// a multi-MB synchronous allocation. 1 MB is far above every realistic
-/// `usage` line and still bounds the worst case.
-const MAX_LINE_BYTES: u64 = 1 << 20;
+/// Tail window read from the end of the transcript. The last qualifying
+/// `usage` line lives in the most recent assistant turn; reading only the
+/// tail keeps steady-state cost O(window) regardless of session length.
+/// 64 KB easily covers dozens of usage records — far more than we need to
+/// find the most recent one.
+const TAIL_WINDOW_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Deserialize, Default)]
 struct TranscriptLine {
@@ -49,37 +49,35 @@ struct Usage {
 /// is found, or every qualifying line sums to zero — a zero total means
 /// "no data captured yet", not "context usage is genuinely zero".
 pub fn last_usage_tokens(path: &str) -> Option<u64> {
-    let file = File::open(path).ok()?;
-    let mut reader = BufReader::new(file);
-    let mut last: Option<u64> = None;
-    let mut buf: Vec<u8> = Vec::new();
-    loop {
-        buf.clear();
-        // `take(MAX + 1)` caps the per-line read; if the line is larger,
-        // `read_until` stops short of `\n` and we discard the rest in
-        // bounded chunks. This protects the statusline from multi-MB
-        // tool-result payloads (e.g. base64 screenshots).
-        let n = {
-            let mut limited = reader.by_ref().take(MAX_LINE_BYTES + 1);
-            limited.read_until(b'\n', &mut buf).unwrap_or(0)
-        };
-        if n == 0 {
-            break;
+    let mut file = File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    if size == 0 {
+        return None;
+    }
+    let start = size.saturating_sub(TAIL_WINDOW_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf: Vec<u8> = Vec::with_capacity(TAIL_WINDOW_BYTES as usize);
+    file.take(TAIL_WINDOW_BYTES).read_to_end(&mut buf).ok()?;
+
+    // If we started mid-file, the bytes up to the first `\n` belong to a
+    // partial line whose head is outside the window — discard them.
+    let scan: &[u8] = if start > 0 {
+        match buf.iter().position(|&b| b == b'\n') {
+            Some(p) => &buf[p + 1..],
+            None => &[], // window contains no line boundary; nothing usable.
         }
-        let complete = buf.last() == Some(&b'\n');
-        if !complete {
-            // Oversized line — drain to next `\n` (or EOF) without
-            // accumulating, then skip this record.
-            skip_to_newline(&mut reader);
+    } else {
+        &buf
+    };
+
+    // Walk lines in reverse and return the first qualifying record. Skip
+    // sidechain / api-error rows, missing-usage rows, and zero-total rows
+    // (a zero sum means "no data captured", not "context usage is zero").
+    for line_bytes in scan.split(|&b| b == b'\n').rev() {
+        if line_bytes.is_empty() {
             continue;
         }
-        buf.pop(); // strip the `\n`
-        // Skip-and-continue on per-line decode errors: a single bad-UTF-8
-        // row shouldn't truncate the scan and silently lose a later valid
-        // line. Written explicitly with `let-else` rather than
-        // `lines().filter_map(Result::ok)` so the error-swallowing is
-        // visible at the call site (clippy lints the latter).
-        let Ok(line) = std::str::from_utf8(&buf) else {
+        let Ok(line) = std::str::from_utf8(line_bytes) else {
             continue;
         };
         let Ok(parsed) = serde_json::from_str::<TranscriptLine>(line) else {
@@ -91,34 +89,18 @@ pub fn last_usage_tokens(path: &str) -> Option<u64> {
         if let Some(msg) = parsed.message
             && let Some(u) = msg.usage
         {
-            // Saturating arithmetic is essentially free here and removes a
-            // theoretical panic / wraparound on adversarial input.
+            // Saturating arithmetic removes a theoretical panic / wrap on
+            // adversarial input; it is essentially free at runtime.
             let sum = u
                 .input_tokens
                 .saturating_add(u.cache_read_input_tokens)
                 .saturating_add(u.cache_creation_input_tokens);
             if sum > 0 {
-                last = Some(sum);
+                return Some(sum);
             }
         }
     }
-    last
-}
-
-/// Advance the reader past the next `\n` (or EOF) without buffering the
-/// skipped bytes. Used to discard the tail of an oversized line.
-fn skip_to_newline(reader: &mut impl BufRead) {
-    let mut scratch: Vec<u8> = Vec::with_capacity(4096);
-    loop {
-        scratch.clear();
-        let n = {
-            let mut chunk = reader.by_ref().take(4096);
-            chunk.read_until(b'\n', &mut scratch).unwrap_or(0)
-        };
-        if n == 0 || scratch.last() == Some(&b'\n') {
-            break;
-        }
-    }
+    None
 }
 
 #[cfg(test)]
@@ -195,6 +177,27 @@ mod tests {
         f.write_all(valid_last).unwrap();
         f.write_all(b"\n").unwrap();
         assert_eq!(last_usage_tokens(f.path().to_str().unwrap()), Some(777));
+    }
+
+    #[test]
+    fn finds_last_usage_in_a_long_transcript() {
+        // Long transcripts (many irrelevant lines before the last useful
+        // usage line) should not hurt the steady-state cost — the
+        // implementation reads from the tail of the file.
+        let mut f = NamedTempFile::new().unwrap();
+        for _ in 0..2000 {
+            writeln!(
+                f,
+                r#"{{"isSidechain":true,"message":{{"usage":{{"input_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}}}}"#
+            )
+            .unwrap();
+        }
+        writeln!(
+            f,
+            r#"{{"message":{{"usage":{{"input_tokens":42,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}}}}"#
+        )
+        .unwrap();
+        assert_eq!(last_usage_tokens(f.path().to_str().unwrap()), Some(42));
     }
 
     #[test]
