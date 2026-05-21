@@ -3,7 +3,7 @@
 //! and ignores errors), so errors are swallowed to stderr.
 
 use anyhow::Result;
-use claude_quota_bar::{cache, git, input, render, theme, time_fmt};
+use claude_quota_bar::{cache, git, input, render, theme, time_fmt, transcript};
 use std::io::Read;
 
 fn main() {
@@ -33,6 +33,7 @@ fn run() -> Result<()> {
     cache::fill_from_cache(&mut data);
 
     let git_info = git::status(&data.workspace.current_dir);
+    let transcript_tokens = transcript::last_usage_tokens(&data.transcript_path);
 
     let layout: Vec<String> = match std::env::var("STATUSLINE_LAYOUT") {
         Ok(s) => s.split(',').map(|x| x.trim().to_string()).collect(),
@@ -49,6 +50,7 @@ fn run() -> Result<()> {
         cache_state: None,
         git_info: git_info.as_ref(),
         layout: &layout,
+        transcript_tokens,
     };
 
     let line = render::render(&ctx);

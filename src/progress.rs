@@ -11,6 +11,7 @@ use crate::theme::Theme;
 pub const DEFAULT_WIDTH: usize = 10;
 
 const FILL_GLYPH: char = '█';
+const HALF_GLYPH: char = '▄';
 const EMPTY_GLYPH: char = '░';
 
 pub fn battery_bar(pct: Option<f64>, theme: &Theme, width: usize) -> String {
@@ -46,14 +47,35 @@ pub fn battery_bar(pct: Option<f64>, theme: &Theme, width: usize) -> String {
     };
 
     if !color_enabled() {
+        // Double-resolution counter for NO_COLOR mode: each cell can be
+        // full / half / empty. Lets a 10-wide bar feel like 20 cells.
+        let filled_halves = match pct {
+            Some(p) => {
+                let clamped = p.clamp(0.0, 100.0);
+                let raw_h = (clamped / 100.0) * (width * 2) as f64;
+                let rounded = (raw_h + 0.5).floor() as usize;
+                if p > 0.0 && rounded == 0 {
+                    1
+                } else {
+                    rounded.min(width * 2)
+                }
+            }
+            None => 0,
+        };
+        let full_cells = filled_halves / 2;
+        let has_half = filled_halves % 2 == 1;
         return centered
             .chars()
             .enumerate()
             .map(|(i, ch)| {
-                if ch == ' ' {
-                    if i < filled { FILL_GLYPH } else { EMPTY_GLYPH }
-                } else {
+                if ch != ' ' {
                     ch
+                } else if i < full_cells {
+                    FILL_GLYPH
+                } else if i == full_cells && has_half {
+                    HALF_GLYPH
+                } else {
+                    EMPTY_GLYPH
                 }
             })
             .collect();
@@ -163,6 +185,27 @@ mod tests {
     }
 
     #[test]
+    fn no_color_mode_no_half_glyph_at_exact_decile() {
+        with_no_color(true, || {
+            // 50% with width=10 → exactly 5 cells. No half-glyph expected.
+            let out = battery_bar(Some(50.0), &GRAPHITE, 10);
+            assert!(!out.contains('▄'), "unexpected half-glyph at 50%: {out:?}");
+        });
+    }
+
+    #[test]
+    fn no_color_mode_uses_half_glyph_at_quarter_intervals() {
+        with_no_color(true, || {
+            // 25% with width=10 → 2.5 cells filled = 2 full + 1 half.
+            let out = battery_bar(Some(25.0), &GRAPHITE, 10);
+            let full = out.chars().filter(|&c| c == '█').count();
+            let half = out.chars().filter(|&c| c == '▄').count();
+            assert_eq!(full, 2, "expected 2 full cells in {out:?}");
+            assert_eq!(half, 1, "expected 1 half cell in {out:?}");
+        });
+    }
+
+    #[test]
     fn no_color_mode_uses_fill_glyphs() {
         with_no_color(true, || {
             let out = battery_bar(Some(50.0), &GRAPHITE, 10);
@@ -191,8 +234,8 @@ mod tests {
     fn small_nonzero_pct_lights_at_least_one_cell() {
         with_no_color(true, || {
             let out = battery_bar(Some(1.0), &GRAPHITE, 10);
-            let filled = out.chars().filter(|&c| c == '█').count();
-            assert!(filled >= 1, "expected at least one filled cell in {out:?}");
+            let lit = out.chars().filter(|&c| c == '█' || c == '▄').count();
+            assert!(lit >= 1, "expected at least one lit cell in {out:?}");
         });
     }
 
