@@ -22,6 +22,12 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        env:
+          # Suppress only DEP0040 (`punycode` deprecation) emitted by the
+          # action's transitive @actions/warpbuild-cache dep on Node ≥ 22.
+          # Tracked upstream: Swatinem/rust-cache#331. Any other Node
+          # warning still surfaces.
+          NODE_OPTIONS: --disable-warning=DEP0040
 
       - name: Format check
         run: cargo fmt --all -- --check
