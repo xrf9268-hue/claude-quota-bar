@@ -49,25 +49,44 @@ struct Usage {
 /// is found, or every qualifying line sums to zero — a zero total means
 /// "no data captured yet", not "context usage is genuinely zero".
 pub fn last_usage_tokens(path: &str) -> Option<u64> {
+    last_usage_tokens_with_window(path, TAIL_WINDOW_BYTES)
+}
+
+fn last_usage_tokens_with_window(path: &str, window: u64) -> Option<u64> {
     let mut file = File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
     if size == 0 {
         return None;
     }
-    let start = size.saturating_sub(TAIL_WINDOW_BYTES);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut buf: Vec<u8> = Vec::with_capacity(TAIL_WINDOW_BYTES as usize);
-    file.take(TAIL_WINDOW_BYTES).read_to_end(&mut buf).ok()?;
+    // Seek to one byte before the window so we can inspect the byte
+    // immediately preceding it. If that byte is `\n`, the window starts
+    // on a line boundary and the first line in `buf` is complete; we
+    // must not discard it. Otherwise the first line is partial and the
+    // bytes up to the first `\n` must be dropped.
+    let raw_start = size.saturating_sub(window);
+    let (probe_start, take_len) = if raw_start == 0 {
+        (0, window)
+    } else {
+        (raw_start - 1, window + 1)
+    };
+    file.seek(SeekFrom::Start(probe_start)).ok()?;
+    let mut buf: Vec<u8> = Vec::with_capacity(take_len as usize);
+    file.take(take_len).read_to_end(&mut buf).ok()?;
 
-    // If we started mid-file, the bytes up to the first `\n` belong to a
-    // partial line whose head is outside the window — discard them.
-    let scan: &[u8] = if start > 0 {
+    let scan: &[u8] = if probe_start == 0 {
+        // Window covers from byte 0 — every line in `buf` is complete.
+        &buf
+    } else if buf.first() == Some(&b'\n') {
+        // The byte just before the window was a newline, so `buf[1..]`
+        // is line-aligned. Skip just the leading newline.
+        &buf[1..]
+    } else {
+        // The intended window begins mid-line. Drop bytes up to and
+        // including the first `\n` we can find inside `buf`.
         match buf.iter().position(|&b| b == b'\n') {
             Some(p) => &buf[p + 1..],
             None => &[], // window contains no line boundary; nothing usable.
         }
-    } else {
-        &buf
     };
 
     // Walk lines in reverse and return the first qualifying record. Skip
@@ -177,6 +196,52 @@ mod tests {
         f.write_all(valid_last).unwrap();
         f.write_all(b"\n").unwrap();
         assert_eq!(last_usage_tokens(f.path().to_str().unwrap()), Some(777));
+    }
+
+    #[test]
+    fn does_not_drop_complete_line_aligned_at_window_start() {
+        // If the tail window happens to begin exactly at a line boundary,
+        // the first line in the window is COMPLETE and must not be
+        // discarded as if it were a partial leftover. Codex caught this:
+        // the prior code unconditionally dropped bytes up to the first
+        // `\n` whenever start > 0, losing a real qualifying line when
+        // the alignment was unlucky.
+        let mut f = NamedTempFile::new().unwrap();
+        // Two padding lines (sidechain so they wouldn't qualify), then
+        // a qualifying line, then a final sidechain line. Sized so the
+        // window of 200 bytes begins exactly at the start of the
+        // qualifying line.
+        let padding = br#"{"isSidechain":true,"message":{"usage":{"input_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        let qualifying = br#"{"message":{"usage":{"input_tokens":4242,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        let trailing = br#"{"isSidechain":true,"message":{"usage":{"input_tokens":2,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#;
+        // Fill ~300 bytes of sidechain padding before the qualifying
+        // line, so that asking for a window of `total - pad_len` lands
+        // the window's left edge exactly on the qualifying line's first
+        // byte.
+        let pad_target = 300_usize;
+        let pad_block: Vec<u8> = {
+            let mut v = Vec::new();
+            while v.len() + padding.len() < pad_target {
+                v.extend_from_slice(padding);
+                v.push(b'\n');
+            }
+            v
+        };
+        let pad_len = pad_block.len();
+        f.write_all(&pad_block).unwrap();
+        f.write_all(qualifying).unwrap();
+        f.write_all(b"\n").unwrap();
+        f.write_all(trailing).unwrap();
+        f.write_all(b"\n").unwrap();
+
+        let total = pad_len as u64 + qualifying.len() as u64 + 1 + trailing.len() as u64 + 1;
+        // Window starts exactly at the qualifying line — i.e. file size
+        // minus window equals pad_len.
+        let window = total - pad_len as u64;
+        assert_eq!(
+            last_usage_tokens_with_window(f.path().to_str().unwrap(), window),
+            Some(4242)
+        );
     }
 
     #[test]
