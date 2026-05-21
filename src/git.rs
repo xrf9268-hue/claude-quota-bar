@@ -234,11 +234,15 @@ fn run_with_timeout(cmd: &mut Command, timeout_ms: u64) -> Option<std::process::
         .ok()?;
     let start = SystemTime::now();
     loop {
-        match child.try_wait().ok()? {
-            Some(_status) => {
+        // Treat both "still running" (`Ok(None)`) and transient errors
+        // (e.g. `EINTR` from a signal landing during `waitpid`) as
+        // "keep polling". The previous `try_wait().ok()?` abandoned a
+        // finished git process whenever a signal interrupted the wait.
+        match child.try_wait() {
+            Ok(Some(_status)) => {
                 return child.wait_with_output().ok();
             }
-            None => {
+            Ok(None) | Err(_) => {
                 let elapsed = start
                     .elapsed()
                     .map(|d| d.as_millis() as u64)
