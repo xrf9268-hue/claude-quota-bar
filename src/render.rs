@@ -12,6 +12,14 @@ use crate::time_fmt::{countdown, fmt_tokens};
 pub const DEFAULT_LAYOUT: &[&str] = &["5h", "7d", "model", "cache", "dir"];
 pub const BAR_WIDTH: usize = 10;
 pub const BRANCH_MAX_LEN: usize = 25;
+/// Cap on the single-dirty-file path width. Past this, fall back to `*1`
+/// so the statusline doesn't get blown out by paths like `tests/.../foo`.
+pub const DIRTY_FILE_MAX_LEN: usize = 30;
+/// Fallback context-usage estimate when neither the transcript nor stdin
+/// reports a usable token count. Covers the system prompt (~3k) + tools
+/// (~15k) + CLAUDE.md (~300) that load before the first user turn, so the
+/// bar never starts at a misleading 0%.
+const BASELINE_TOKENS: u64 = 20_000;
 
 pub struct Context<'a> {
     pub input: &'a Input,
@@ -20,6 +28,10 @@ pub struct Context<'a> {
     pub cache_state: Option<String>,
     pub git_info: Option<&'a GitInfo>,
     pub layout: &'a [String],
+    /// Pre-resolved context-token count from the transcript JSONL. The
+    /// renderer is pure — `main.rs` calls `transcript::last_usage_tokens`
+    /// before constructing the `Context` and threads the result through here.
+    pub transcript_tokens: Option<u64>,
 }
 
 pub fn render(ctx: &Context) -> String {
@@ -78,10 +90,17 @@ fn build_model(ctx: &Context) -> String {
     let r = reset();
     match &ctx.input.context_window {
         Some(cw) if cw.context_window_size > 0 => {
-            let used = cw.total_input_tokens + cw.total_output_tokens;
+            let (used, baseline) = match ctx.transcript_tokens {
+                Some(n) => (n, false),
+                None if cw.total_input_tokens > 0 => (cw.total_input_tokens, false),
+                None => (BASELINE_TOKENS, true),
+            };
             let used_text = fmt_tokens(used);
+            let prefix = if baseline { "~" } else { "" };
             let win_text = fmt_tokens(cw.context_window_size);
-            format!("{model_color}{name}{r}{mute}({r}{used_text}{mute}/{r}{win_text}{mute}){r}")
+            format!(
+                "{model_color}{name}{r}{mute}({r}{prefix}{used_text}{mute}/{r}{win_text}{mute}){r}"
+            )
         }
         _ => format!("{model_color}{name}{r}"),
     }
@@ -118,7 +137,15 @@ fn build_dir(ctx: &Context) -> Option<String> {
         let branch = truncate_branch(&git.branch, BRANCH_MAX_LEN);
         out.push_str(&format!("{mute}:{r}{ink}{branch}{r}"));
         if git.dirty_count > 0 {
-            out.push_str(&format!(" {warn}*{}{r}", git.dirty_count));
+            if let Some(file) = git
+                .dirty_file
+                .as_deref()
+                .filter(|f| git.dirty_count == 1 && f.chars().count() <= DIRTY_FILE_MAX_LEN)
+            {
+                out.push_str(&format!(" {warn}*{file}{r}"));
+            } else {
+                out.push_str(&format!(" {warn}*{}{r}", git.dirty_count));
+            }
         }
         if git.ahead > 0 {
             out.push_str(&format!(" {ink}↑{}{r}", git.ahead));
@@ -169,6 +196,7 @@ mod tests {
             cache_state: None,
             git_info: git,
             layout,
+            transcript_tokens: None,
         }
     }
 
@@ -252,14 +280,55 @@ mod tests {
     }
 
     #[test]
-    fn model_includes_context_tokens() {
+    fn build_model_uses_context_transcript_tokens() {
+        no_color(|| {
+            let inp = full_input();
+            let lay = layout(&["model"]);
+            let mut c = ctx(&inp, &lay, None);
+            c.transcript_tokens = Some(99_000);
+            let out = strip_ansi(&render(&c));
+            assert!(
+                out.contains("99.0k"),
+                "expected transcript-derived 99.0k in {out:?}"
+            );
+            assert!(!out.contains("65.0k"), "stdin value leaked: {out:?}");
+        });
+    }
+
+    #[test]
+    fn model_shows_baseline_when_transcript_missing_and_stdin_zero() {
+        no_color(|| {
+            let mut inp = full_input();
+            // Fresh session: no transcript yet, stdin context_window present
+            // but total_input_tokens still 0 — display the ~20k baseline so
+            // users see the system prompt + tools load, not a misleading 0.
+            inp.transcript_path = String::new();
+            if let Some(cw) = inp.context_window.as_mut() {
+                cw.total_input_tokens = 0;
+            }
+            let lay = layout(&["model"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(
+                out.contains("~20.0k"),
+                "expected ~20.0k baseline in {out:?}"
+            );
+            assert!(out.contains("200.0k"));
+        });
+    }
+
+    #[test]
+    fn model_shows_input_tokens_only_not_input_plus_output() {
         no_color(|| {
             let inp = full_input();
             let lay = layout(&["model"]);
             let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            // 65k input + 6k output — we now display only input (the
+            // last assistant message's `input_tokens` already includes the
+            // prior turn's output, so adding output_tokens would double-count).
+            assert!(out.contains("65.0k"), "expected 65.0k in {out:?}");
             assert!(
-                out.contains("71.0k"),
-                "missing input+output tokens in {out:?}"
+                !out.contains("71.0k"),
+                "input+output sum leaked into output: {out:?}"
             );
             assert!(out.contains("200.0k"), "missing window size in {out:?}");
         });
@@ -292,10 +361,7 @@ mod tests {
             let inp = full_input();
             let git = GitInfo {
                 branch: "main".into(),
-                detached: false,
-                dirty_count: 0,
-                ahead: 0,
-                behind: 0,
+                ..Default::default()
             };
             let lay = layout(&["dir"]);
             let out = strip_ansi(&render(&ctx(&inp, &lay, Some(&git))));
@@ -310,14 +376,56 @@ mod tests {
             let inp = full_input();
             let git = GitInfo {
                 branch: "main".into(),
-                detached: false,
                 dirty_count: 3,
-                ahead: 0,
-                behind: 0,
+                ..Default::default()
             };
             let lay = layout(&["dir"]);
             let out = strip_ansi(&render(&ctx(&inp, &lay, Some(&git))));
             assert!(out.contains("*3"), "missing dirty count in {out:?}");
+        });
+    }
+
+    #[test]
+    fn dir_segment_shows_filename_when_single_dirty() {
+        no_color(|| {
+            let inp = full_input();
+            let git = GitInfo {
+                branch: "main".into(),
+                dirty_count: 1,
+                dirty_file: Some("src/foo.rs".into()),
+                ..Default::default()
+            };
+            let lay = layout(&["dir"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, Some(&git))));
+            assert!(out.contains("src/foo.rs"), "missing filename in {out:?}");
+            assert!(
+                !out.contains("*1"),
+                "should not show *1 when filename available: {out:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn dir_segment_falls_back_to_count_when_filename_too_long() {
+        no_color(|| {
+            let inp = full_input();
+            let long = "a".repeat(40);
+            let git = GitInfo {
+                branch: "main".into(),
+                dirty_count: 1,
+                dirty_file: Some(long.clone()),
+                ..Default::default()
+            };
+            let lay = layout(&["dir"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, Some(&git))));
+            assert!(
+                out.contains("*1"),
+                "expected *1 fallback for long filename: {out:?}"
+            );
+            assert!(
+                !out.contains(&long),
+                "long filename should not be shown: {out:?}"
+            );
         });
     }
 
@@ -327,10 +435,7 @@ mod tests {
             let inp = full_input();
             let git = GitInfo {
                 branch: "main".into(),
-                detached: false,
-                dirty_count: 0,
-                ahead: 0,
-                behind: 0,
+                ..Default::default()
             };
             let lay = layout(&["dir"]);
             let out = strip_ansi(&render(&ctx(&inp, &lay, Some(&git))));
@@ -403,10 +508,7 @@ mod tests {
             let long = "feature/this-is-a-very-long-branch-name-that-needs-truncation";
             let git = GitInfo {
                 branch: long.into(),
-                detached: false,
-                dirty_count: 0,
-                ahead: 0,
-                behind: 0,
+                ..Default::default()
             };
             let lay = layout(&["dir"]);
             let out = strip_ansi(&render(&ctx(&inp, &lay, Some(&git))));
@@ -429,10 +531,9 @@ mod tests {
             let inp = full_input();
             let git = GitInfo {
                 branch: "main".into(),
-                detached: false,
-                dirty_count: 0,
                 ahead: 2,
                 behind: 1,
+                ..Default::default()
             };
             let lay = layout(&["dir"]);
             let out = strip_ansi(&render(&ctx(&inp, &lay, Some(&git))));

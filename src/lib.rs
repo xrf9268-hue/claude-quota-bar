@@ -12,3 +12,4 @@ pub mod progress;
 pub mod render;
 pub mod theme;
 pub mod time_fmt;
+pub mod transcript;

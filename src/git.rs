@@ -18,6 +18,9 @@ pub struct GitInfo {
     pub branch: String,
     pub detached: bool,
     pub dirty_count: u32,
+    /// Populated only when `dirty_count == 1`. Carries the single changed
+    /// path so the dir segment can render the filename instead of "*1".
+    pub dirty_file: Option<String>,
     pub ahead: u32,
     pub behind: u32,
 }
@@ -144,12 +147,51 @@ fn parse_status(out: &str) -> Option<GitInfo> {
         }
     }
 
+    let mut first_line: Option<&str> = None;
     for line in lines {
-        if !line.trim().is_empty() {
-            info.dirty_count += 1;
+        if line.trim().is_empty() {
+            continue;
         }
+        if info.dirty_count == 0 {
+            first_line = Some(line);
+        }
+        info.dirty_count += 1;
+    }
+    if info.dirty_count == 1
+        && let Some(l) = first_line
+    {
+        info.dirty_file = extract_dirty_path(l);
     }
     Some(info)
+}
+
+/// Extract the displayable path from a porcelain v1 row (`XY path`).
+///
+/// - For rename (`R`) and copy (`C`) status codes in the index slot, the
+///   payload is `old -> new`; we surface the destination.
+/// - For all other codes a literal ` -> ` is part of the filename and must
+///   be preserved.
+/// - Git wraps paths containing unusual characters in C-style double
+///   quotes; strip the outer pair so the rendered name is the actual path.
+fn extract_dirty_path(line: &str) -> Option<String> {
+    // The first three bytes are always ASCII (status chars + space), so
+    // direct byte indexing is safe. The path tail may be UTF-8.
+    let bytes = line.as_bytes();
+    if bytes.len() < 3 {
+        return None;
+    }
+    let x = bytes[0] as char;
+    let raw = line.get(3..)?;
+    let path = if matches!(x, 'R' | 'C') {
+        raw.rsplit(" -> ").next().unwrap_or(raw)
+    } else {
+        raw
+    };
+    let cleaned = path
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(path);
+    Some(cleaned.to_string())
 }
 
 /// Run a command with a wall-clock timeout. On timeout we kill the child
@@ -194,6 +236,69 @@ mod tests {
         assert_eq!(info.dirty_count, 2);
         assert_eq!(info.ahead, 0);
         assert_eq!(info.behind, 0);
+    }
+
+    #[test]
+    fn parse_captures_single_dirty_filename() {
+        let s = "## main...origin/main\n M src/foo.rs\n";
+        let info = parse_status(s).unwrap();
+        assert_eq!(info.dirty_count, 1);
+        assert_eq!(info.dirty_file.as_deref(), Some("src/foo.rs"));
+    }
+
+    #[test]
+    fn parse_strips_outer_quotes_from_path() {
+        // Porcelain v1 wraps paths containing non-printable / non-ASCII
+        // chars in C-style double quotes. Strip them so the display name
+        // doesn't carry the framing.
+        let s = "## main...origin/main\n M \"weird path.rs\"\n";
+        let info = parse_status(s).unwrap();
+        assert_eq!(info.dirty_count, 1);
+        assert_eq!(info.dirty_file.as_deref(), Some("weird path.rs"));
+    }
+
+    #[test]
+    fn parse_does_not_split_arrow_for_non_rename_status() {
+        // A modified (not renamed) file whose name literally contains ` -> `
+        // must keep the full path. Only R / C status rows use the arrow as
+        // the old/new separator.
+        let s = "## main...origin/main\n M weird -> name.txt\n";
+        let info = parse_status(s).unwrap();
+        assert_eq!(info.dirty_count, 1);
+        assert_eq!(info.dirty_file.as_deref(), Some("weird -> name.txt"));
+    }
+
+    #[test]
+    fn parse_copy_status_takes_destination() {
+        // C (copied) uses the same `old -> new` syntax as R.
+        let s = "## main...origin/main\nC  src/a.rs -> src/b.rs\n";
+        let info = parse_status(s).unwrap();
+        assert_eq!(info.dirty_count, 1);
+        assert_eq!(info.dirty_file.as_deref(), Some("src/b.rs"));
+    }
+
+    #[test]
+    fn parse_rename_captures_new_name() {
+        let s = "## main...origin/main\nR  src/old.rs -> src/new.rs\n";
+        let info = parse_status(s).unwrap();
+        assert_eq!(info.dirty_count, 1);
+        assert_eq!(info.dirty_file.as_deref(), Some("src/new.rs"));
+    }
+
+    #[test]
+    fn parse_untracked_captures_filename() {
+        let s = "## main...origin/main\n?? new_file.txt\n";
+        let info = parse_status(s).unwrap();
+        assert_eq!(info.dirty_count, 1);
+        assert_eq!(info.dirty_file.as_deref(), Some("new_file.txt"));
+    }
+
+    #[test]
+    fn parse_skips_dirty_filename_when_multiple_files() {
+        let s = "## main...origin/main\n M src/foo.rs\n?? new.txt\n";
+        let info = parse_status(s).unwrap();
+        assert_eq!(info.dirty_count, 2);
+        assert!(info.dirty_file.is_none());
     }
 
     #[test]
