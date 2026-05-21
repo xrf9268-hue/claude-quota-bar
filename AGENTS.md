@@ -53,6 +53,9 @@ Don't write production code without a failing test first.
   strings, not escapes, when color is off.
 - Battery bar (`progress::battery_bar`) batches consecutive cells of the same
   background. Don't regress that — per-cell escapes blow up the output 10×.
+- Bar text uses two fg colors (`text_on_filled` dark, `text_on_empty` light)
+  so the percentage stays readable on both the light severity bgs and the
+  dark gutter. A single fg fails WCAG contrast on at least one of them.
 - Severity thresholds (`theme::WARN_THRESHOLD = 30.0`, `HOT_THRESHOLD = 70.0`)
   are global. Don't add a config knob without a real user need.
 
