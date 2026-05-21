@@ -167,14 +167,16 @@ fn parse_status(out: &str) -> Option<GitInfo> {
 
 /// Extract the displayable path from a porcelain v1 row (`XY path`).
 ///
-/// - For rename (`R`) and copy (`C`) status codes in the index slot, the
+/// - For rename (`R`) and copy (`C`) status codes in either column, the
 ///   payload is `old -> new`. If the source is C-quoted, skip past its
 ///   closing quote before looking for the separator — otherwise a ` -> `
 ///   inside the quoted source name would be mistaken for the separator.
 /// - For all other codes a literal ` -> ` is part of the filename and must
 ///   be preserved.
-/// - Git wraps paths containing unusual characters in C-style double
-///   quotes; strip the outer pair so the rendered name is the actual path.
+/// - Git wraps paths containing unusual chars in C-style double quotes
+///   with embedded escapes (octal `\NNN` for non-ASCII bytes, `\"`, `\\`,
+///   `\n`, `\t`, `\r`). When present, strip the outer pair AND decode the
+///   inner escapes so the rendered name is the actual filename.
 fn extract_dirty_path(line: &str) -> Option<String> {
     // The first three bytes are always ASCII (status chars + space), so
     // direct byte indexing is safe. The path tail may be UTF-8.
@@ -183,17 +185,86 @@ fn extract_dirty_path(line: &str) -> Option<String> {
         return None;
     }
     let x = bytes[0] as char;
+    let y = bytes[1] as char;
     let raw = line.get(3..)?;
-    let path = if matches!(x, 'R' | 'C') {
+    let path = if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
         rename_destination(raw).unwrap_or(raw)
     } else {
         raw
     };
-    let cleaned = path
-        .strip_prefix('"')
-        .and_then(|s| s.strip_suffix('"'))
-        .unwrap_or(path);
-    Some(cleaned.to_string())
+    Some(
+        if let Some(inner) = path.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+            c_unquote(inner)
+        } else {
+            path.to_string()
+        },
+    )
+}
+
+/// Decode the contents of a C-style quoted porcelain path. Handles the
+/// escapes git actually emits (`\"`, `\\`, `\n`, `\t`, `\r`, and octal
+/// `\NNN` for non-ASCII bytes). Multi-byte sequences are reassembled and
+/// lossy-decoded as UTF-8 — a filename git produced from a UTF-8
+/// filesystem round-trips exactly; truly invalid bytes get U+FFFD rather
+/// than panicking.
+fn c_unquote(inner: &str) -> String {
+    let bytes = inner.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' || i + 1 >= bytes.len() {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        let next = bytes[i + 1];
+        match next {
+            b'"' => {
+                out.push(b'"');
+                i += 2;
+            }
+            b'\\' => {
+                out.push(b'\\');
+                i += 2;
+            }
+            b'n' => {
+                out.push(b'\n');
+                i += 2;
+            }
+            b't' => {
+                out.push(b'\t');
+                i += 2;
+            }
+            b'r' => {
+                out.push(b'\r');
+                i += 2;
+            }
+            b'0'..=b'7' if i + 3 < bytes.len() => {
+                let mut val: u16 = 0;
+                let mut ok = true;
+                for j in 0..3 {
+                    let d = bytes[i + 1 + j];
+                    if !(b'0'..=b'7').contains(&d) {
+                        ok = false;
+                        break;
+                    }
+                    val = val * 8 + (d - b'0') as u16;
+                }
+                if ok && val <= 0xff {
+                    out.push(val as u8);
+                    i += 4;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            }
+            _ => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Find the destination half of an `old -> new` rename payload, handling
@@ -278,6 +349,41 @@ mod tests {
         let info = parse_status(s).unwrap();
         assert_eq!(info.dirty_count, 1);
         assert_eq!(info.dirty_file.as_deref(), Some("src/foo.rs"));
+    }
+
+    #[test]
+    fn parse_decodes_c_octal_escapes_in_quoted_path() {
+        // Porcelain v1 with `core.quotePath=true` (the default) emits
+        // non-ASCII bytes as octal `\NNN` escapes inside the quoted form.
+        // `\303\251` is the UTF-8 of `é`. Without decoding we'd render
+        // the escape sequence verbatim.
+        let s = "## main...origin/main\n?? \"\\303\\251.txt\"\n";
+        let info = parse_status(s).unwrap();
+        assert_eq!(info.dirty_count, 1);
+        assert_eq!(info.dirty_file.as_deref(), Some("é.txt"));
+    }
+
+    #[test]
+    fn parse_decodes_embedded_escaped_quote_and_backslash() {
+        // `\"` inside the quoted path is a literal `"`; `\\` is a literal
+        // `\`. Both occur in real-world filenames and must be unescaped
+        // for display.
+        let s = "## main...origin/main\n M \"a\\\"b\\\\c.txt\"\n";
+        let info = parse_status(s).unwrap();
+        assert_eq!(info.dirty_count, 1);
+        assert_eq!(info.dirty_file.as_deref(), Some("a\"b\\c.txt"));
+    }
+
+    #[test]
+    fn parse_worktree_side_rename_extracts_destination() {
+        // Defensive: porcelain v1 docs put rename codes in the X (index)
+        // column today, but the parser shouldn't depend on that. A row
+        // where Y is `R` (`" R old -> new"`) must still take the new
+        // path, not display the full `old -> new` payload.
+        let s = "## main...origin/main\n R old.txt -> new.txt\n";
+        let info = parse_status(s).unwrap();
+        assert_eq!(info.dirty_count, 1);
+        assert_eq!(info.dirty_file.as_deref(), Some("new.txt"));
     }
 
     #[test]
