@@ -21,7 +21,7 @@ prompt-cache state, and `dir:branch *N`.
 
 ```sh
 cargo build --release          # ~460KB binary at target/release/claude-quota-bar
-cargo test                     # 77 tests, lib + integration
+cargo test                     # 100+ tests, lib + integration
 cargo fmt --all -- --check     # rustfmt clean
 cargo clippy --all-targets -- -D warnings
 ```
@@ -80,6 +80,17 @@ These are the load-bearing decisions that aren't obvious from reading code:
    `main::main` swallows errors to stderr. Claude Code reads stdout — a crash
    shows up as a blank statusline (annoying) instead of a panic (broken).
 
+5. **Context-token source precedence** in `render::build_model`:
+   `Context.transcript_tokens` (resolved by `main.rs` from the JSONL) wins;
+   stdin `total_input_tokens` is the fallback; a 20k baseline is last so a
+   fresh session shows `~10%` instead of `0%`. Stdin under-counts by
+   ~10–15k because it excludes system prompt + tools + CLAUDE.md
+   (anthropics/claude-code#22955). **Never add `total_output_tokens` to
+   the sum** — the last assistant message's `input_tokens` already includes
+   the prior turn's output. **`transcript::last_usage_tokens` treats a
+   zero sum as `None`**, not `Some(0)` — a zero total means "no data
+   captured", not "context usage is genuinely zero".
+
 ## Release process
 
 Tag-driven, fully automated via `.github/workflows/release.yml`:
@@ -127,6 +138,7 @@ src/
 ├── time_fmt.rs    # countdown formatting, token compaction (1.2k / 1.5M)
 ├── render.rs      # pure composition; takes Context, returns String
 ├── git.rs         # shells out to git with 1s timeout + 5s cache
+├── transcript.rs  # JSONL scan for last non-sidechain usage tokens
 └── cache.rs       # ~/.cache/claude-quota-bar/last_stdin.json hydration
 tests/
 └── integration.rs # assert_cmd snapshot tests of the full binary
