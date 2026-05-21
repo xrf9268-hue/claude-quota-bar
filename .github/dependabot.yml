@@ -1,6 +1,6 @@
-# Keep GitHub Actions used by ci.yml + release.yml current.
-# Cargo deps are intentionally not tracked here — AGENTS.md caps runtime
-# deps at 3 (serde, serde_json, anyhow); bumps go through review by hand.
+# Monthly grouped bumps — one PR per ecosystem per cycle, not a flood.
+# Cargo is tracked too: AGENTS.md's "3 runtime deps" cap is about
+# *adding* deps, not pinning the existing ones to stale versions.
 version: 2
 updates:
   - package-ecosystem: "github-actions"
@@ -12,3 +12,13 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "ci"
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      cargo:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"
