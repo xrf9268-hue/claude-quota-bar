@@ -5,10 +5,17 @@
 # CI and this script is never needed again.
 #
 # Prerequisites:
-#   - npm login (interactive, 2FA OK — this runs locally, not in CI)
+#   - npm login (interactive)
+#   - If your npm account has "Require 2FA for write actions" enabled,
+#     either temporarily disable it OR set NPM_OTP to a current TOTP.
 #   - cwd at repo root
 
 set -euo pipefail
+
+OTP_ARG=()
+if [ -n "${NPM_OTP:-}" ]; then
+  OTP_ARG=(--otp="${NPM_OTP}")
+fi
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -47,7 +54,7 @@ publish_platform() {
     fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
   "
 
-  ( cd "${dir}" && npm publish --access=public )
+  ( cd "${dir}" && npm publish --access=public "${OTP_ARG[@]}" )
 
   # Restore original 0.1.0 (will be re-patched by CI's prepare-packages.js).
   echo "${original}" > "${dir}/package.json"
@@ -72,7 +79,7 @@ publish_umbrella() {
     fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
   "
 
-  ( cd "${dir}" && npm publish --access=public )
+  ( cd "${dir}" && npm publish --access=public "${OTP_ARG[@]}" )
 
   echo "${original}" > "${dir}/package.json"
 }
