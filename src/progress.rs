@@ -1,9 +1,11 @@
 //! Battery-bar rendering — percentage text centered inside a colored bar,
 //! filled cells use the severity background, empty cells use the gutter.
+//! Text foreground flips per cell so digits stay readable on both the
+//! light severity bg and the dark gutter.
 //!
 //! In NO_COLOR mode, fill state is encoded with Unicode block glyphs
-//! (`█` for filled cells, `░` for empty) so the bar still conveys
-//! progress without escape codes.
+//! (`█` full, `▄` half, `░` empty) so the bar still conveys progress
+//! without escape codes.
 
 use crate::ansi::{bg, color_enabled, fg, reset};
 use crate::theme::Theme;
@@ -86,19 +88,23 @@ pub fn battery_bar(pct: Option<f64>, theme: &Theme, width: usize) -> String {
         None => theme.bg_empty,
     };
     let bg_empty = theme.bg_empty;
-    let fg_text = fg(theme.text_on_bar);
+    let fg_filled = fg(theme.text_on_filled);
+    let fg_empty = fg(theme.text_on_empty);
 
     // Batch consecutive cells with the same background. The fill/empty
     // transition produces at most two color groups per bar, so the inner
     // text (e.g. "42%") stays contiguous in the output — simpler for
     // tests and ~10× less ANSI overhead per render than per-char escapes.
+    // The fg color flips with the bg so the digits stay readable on either
+    // side (WCAG contrast fails if one fg covers both light + dark bgs).
     let mut out = String::with_capacity(width + 64);
     let mut last_bg: Option<[u8; 3]> = None;
     for (i, ch) in centered.chars().enumerate() {
-        let current_bg = if i < filled { bg_fill } else { bg_empty };
+        let in_filled = i < filled;
+        let current_bg = if in_filled { bg_fill } else { bg_empty };
         if last_bg != Some(current_bg) {
             out.push_str(&bg(current_bg));
-            out.push_str(&fg_text);
+            out.push_str(if in_filled { &fg_filled } else { &fg_empty });
             last_bg = Some(current_bg);
         }
         out.push(ch);
@@ -236,6 +242,29 @@ mod tests {
             let out = battery_bar(Some(1.0), &GRAPHITE, 10);
             let lit = out.chars().filter(|&c| c == '█' || c == '▄').count();
             assert!(lit >= 1, "expected at least one lit cell in {out:?}");
+        });
+    }
+
+    #[test]
+    fn partial_bar_uses_dark_text_on_filled_and_light_text_on_empty() {
+        // The percentage text spans cells with both fill states, so the
+        // bar must switch fg color per cell to stay readable on either
+        // background. One color for both sides yields a WCAG-failing
+        // contrast on at least one of them.
+        with_no_color(false, || {
+            let out = battery_bar(Some(50.0), &GRAPHITE, 10);
+            let [fr, fg_, fb] = GRAPHITE.text_on_filled;
+            let [er, eg, eb] = GRAPHITE.text_on_empty;
+            let filled_fg = format!("\x1b[38;2;{fr};{fg_};{fb}m");
+            let empty_fg = format!("\x1b[38;2;{er};{eg};{eb}m");
+            assert!(
+                out.contains(&filled_fg),
+                "missing dark fg on filled cells in {out:?}"
+            );
+            assert!(
+                out.contains(&empty_fg),
+                "missing light fg on empty cells in {out:?}"
+            );
         });
     }
 

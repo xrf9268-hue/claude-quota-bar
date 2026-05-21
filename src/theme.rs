@@ -11,8 +11,12 @@ pub struct Theme {
     pub bg_hot: [u8; 3],
     /// Battery-bar background for unfilled cells (dark gutter).
     pub bg_empty: [u8; 3],
-    /// Foreground for text overlaid on the battery bar.
-    pub text_on_bar: [u8; 3],
+    /// Foreground for the percentage text where it lands on a filled
+    /// (light-colored) severity cell. Dark so the text is readable.
+    pub text_on_filled: [u8; 3],
+    /// Foreground for the percentage text where it lands on an empty
+    /// (dark gutter) cell. Light so the text is readable.
+    pub text_on_empty: [u8; 3],
     /// Muted color for separators and bracket framing.
     pub mute: [u8; 3],
     /// Ink for non-bar text (reset countdown, model, dir).
@@ -26,16 +30,37 @@ pub struct Theme {
 pub const WARN_THRESHOLD: f64 = 30.0;
 pub const HOT_THRESHOLD: f64 = 70.0;
 
+// Palette tuned for two things: (1) WCAG-grade contrast for the percentage
+// text on every severity background by pairing light bgs with dark text;
+// (2) hue alignment with the Anthropic brand palette where it doesn't
+// fight legibility on a dark terminal.
 pub const GRAPHITE: Theme = Theme {
-    bg_ok: [108, 167, 116],
-    bg_warn: [232, 178, 96],
-    bg_hot: [220, 100, 92],
+    // Anthropic Green — olive, calm, "everything is fine".
+    bg_ok: [120, 140, 93],
+    // Warm amber — kept warm but slightly darkened from the original so
+    // dark text on it lands well above WCAG AA.
+    bg_warn: [216, 165, 96],
+    // Coral red — darkened from the original vibrant tone to ease the
+    // eye when a long-running session sits at 100%.
+    bg_hot: [184, 80, 64],
+    // Gutter — unchanged; dark enough to read light text on without
+    // disappearing into the terminal background.
     bg_empty: [60, 65, 72],
-    text_on_bar: [238, 235, 224],
+    // Anthropic Dark — overlaid on the filled (light) severity cells.
+    text_on_filled: [20, 20, 19],
+    // Anthropic Light — overlaid on the gutter.
+    text_on_empty: [250, 249, 245],
+    // Subdued separators / brackets; kept darker than `ink` so the
+    // structural punctuation recedes visually.
     mute: [120, 125, 132],
-    ink: [200, 200, 200],
-    model: [120, 220, 140],
-    warn: [232, 178, 96],
+    // Warm off-white for segment labels (5h, 7d, dir).
+    ink: [232, 230, 220],
+    // Anthropic Blue — model name. Calmer than the prior vibrant mint
+    // and distinct from the severity hues.
+    model: [106, 155, 204],
+    // Anthropic Orange — dirty-file count indicator; visually distinct
+    // from `bg_warn`'s amber so it doesn't blend into the bar.
+    warn: [217, 119, 87],
 };
 
 impl Theme {
