@@ -192,13 +192,25 @@ fn extract_dirty_path(line: &str) -> Option<String> {
     } else {
         raw
     };
-    Some(
-        if let Some(inner) = path.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-            c_unquote(inner)
-        } else {
-            path.to_string()
-        },
-    )
+    let decoded = if let Some(inner) = path.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        c_unquote(inner)
+    } else {
+        path.to_string()
+    };
+    // After `c_unquote`, the path may contain real control bytes (`\033`,
+    // `\n`, `\t`, ...) that were octal-escaped on the wire. Writing them
+    // straight into the one-line statusline breaks layout and enables
+    // ANSI-escape injection from an attacker-controlled filename. Replace
+    // every control char with a visible placeholder before returning.
+    Some(sanitize_for_display(&decoded))
+}
+
+/// Replace any Unicode control character with U+00B7 (`·`) so the result
+/// is safe to write verbatim into a terminal statusline.
+fn sanitize_for_display(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '·' } else { c })
+        .collect()
 }
 
 /// Decode the contents of a C-style quoted porcelain path. Handles the
@@ -349,6 +361,25 @@ mod tests {
         let info = parse_status(s).unwrap();
         assert_eq!(info.dirty_count, 1);
         assert_eq!(info.dirty_file.as_deref(), Some("src/foo.rs"));
+    }
+
+    #[test]
+    fn parse_sanitizes_control_chars_in_filename() {
+        // Codex P1: a filename containing octal-escaped control bytes
+        // (e.g. `\033` ESC, `\n`, `\r`, `\t`) would otherwise decode to
+        // raw control chars and be written verbatim into the terminal —
+        // breaking the one-line statusline and opening an ANSI-injection
+        // vector. Every control char must be replaced with a benign
+        // placeholder before rendering.
+        let s = "## main...origin/main\n?? \"\\033[31mevil\\nname.txt\"\n";
+        let info = parse_status(s).unwrap();
+        assert_eq!(info.dirty_count, 1);
+        let f = info.dirty_file.unwrap();
+        assert!(!f.contains('\x1b'), "raw ESC leaked: {f:?}");
+        assert!(!f.contains('\n'), "raw newline leaked: {f:?}");
+        // The structural rest of the filename should still be visible.
+        assert!(f.contains("evil"));
+        assert!(f.contains("name.txt"));
     }
 
     #[test]
