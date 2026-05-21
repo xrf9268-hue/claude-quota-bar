@@ -9,4 +9,6 @@ node_modules/
 npm-publish/
 # Cache dir created by test runs that use the project as $HOME.
 /.cache/
+# npm 平台子包的 binary 目录由 CI release 填充(或 bootstrap-npm.sh 临时占位)，不进 git。
+npm/platforms/*/bin/
 
