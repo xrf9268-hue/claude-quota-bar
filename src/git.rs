@@ -168,7 +168,9 @@ fn parse_status(out: &str) -> Option<GitInfo> {
 /// Extract the displayable path from a porcelain v1 row (`XY path`).
 ///
 /// - For rename (`R`) and copy (`C`) status codes in the index slot, the
-///   payload is `old -> new`; we surface the destination.
+///   payload is `old -> new`; the separator is the FIRST ` -> ` on the
+///   row (a destination filename may itself contain ` -> `). We surface
+///   the destination, which is everything after that first separator.
 /// - For all other codes a literal ` -> ` is part of the filename and must
 ///   be preserved.
 /// - Git wraps paths containing unusual characters in C-style double
@@ -183,7 +185,7 @@ fn extract_dirty_path(line: &str) -> Option<String> {
     let x = bytes[0] as char;
     let raw = line.get(3..)?;
     let path = if matches!(x, 'R' | 'C') {
-        raw.rsplit(" -> ").next().unwrap_or(raw)
+        raw.split_once(" -> ").map(|(_, dest)| dest).unwrap_or(raw)
     } else {
         raw
     };
@@ -266,6 +268,29 @@ mod tests {
         let info = parse_status(s).unwrap();
         assert_eq!(info.dirty_count, 1);
         assert_eq!(info.dirty_file.as_deref(), Some("weird -> name.txt"));
+    }
+
+    #[test]
+    fn parse_rename_destination_with_arrow_in_name() {
+        // Git's porcelain v1 separator is the FIRST ` -> ` on a rename row.
+        // A destination filename can itself contain ` -> ` (it's a legal
+        // ASCII filename and git only quotes paths with truly unprintable
+        // chars). A greedy `rsplit` truncates the destination wrongly.
+        let s = "## main...origin/main\nR  old.txt -> new -> name.txt\n";
+        let info = parse_status(s).unwrap();
+        assert_eq!(info.dirty_count, 1);
+        assert_eq!(info.dirty_file.as_deref(), Some("new -> name.txt"));
+    }
+
+    #[test]
+    fn parse_rename_quoted_destination_with_arrow() {
+        // Codex-flagged variant: when the destination is also C-quoted,
+        // the right outer quote must still be stripped after taking the
+        // (full) destination.
+        let s = "## main...origin/main\nR  \"old.txt\" -> \"new -> name.txt\"\n";
+        let info = parse_status(s).unwrap();
+        assert_eq!(info.dirty_count, 1);
+        assert_eq!(info.dirty_file.as_deref(), Some("new -> name.txt"));
     }
 
     #[test]
