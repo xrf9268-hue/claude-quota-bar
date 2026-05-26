@@ -2,10 +2,10 @@
 
 Fast Rust statusline for [Claude Code](https://github.com/anthropics/claude-code).
 Battery-style 5-hour / 7-day quota bars, context-window indicator, prompt-cache
-state, and `dir:branch *N` — at ~2.5ms cold start and a 459KB binary.
+state, and `dir:branch *N` — at ~2.5ms cold start and a ~0.5MB binary.
 
 ```
-5h[███42%░░░░]⏰26m | 7d[███35%░░░░]⏰8d3h | Opus 4.7(71.0k/200.0k) | cache 4m12s | proj:main *3
+5h[███42%░░░░]⏰26m | 7d[███35%░░░░]⏰8d3h | Opus 4.7(71.0k/1.0M) | cache 4m12s | proj:main *3
 ```
 
 ## Why this and not the Python ones
@@ -50,7 +50,7 @@ Default layout: `5h,7d,model,cache,dir`.
 |---------|--------|---------------|
 | `5h`    | `rate_limits.five_hour` | Battery bar with `%` inside, plus `⏰` countdown to reset |
 | `7d`    | `rate_limits.seven_day` | Same, weekly window |
-| `model` | `model` + `context_window` | `Opus 4.7(71k/200k)` — model + ctx tokens used / window |
+| `model` | `model` + `context_window` | `Opus 4.7(71.0k/1.0M)` — model + ctx tokens used / window |
 | `cache` | transcript scan | Time left on the prompt cache (`4m12s`), or `COLD` once it has expired |
 | `dir`   | `workspace.current_dir` + git | `proj:main *3 ↑1 ↓2` — dir, branch, dirty count, ahead/behind |
 
@@ -76,7 +76,7 @@ Severity thresholds (green / yellow / red) flip at 30% and 70% quota used.
 Requires Rust ≥ 1.85 (Edition 2024).
 
 ```sh
-cargo test                          # 70 tests
+cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 
@@ -89,6 +89,9 @@ cat <<EOF | cargo run --release
 }
 EOF
 ```
+
+Releases are fully automated (release-plz Release PR → crates.io + npm + GitHub
+Release via OIDC). See [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 
