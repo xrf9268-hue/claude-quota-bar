@@ -1,23 +1,60 @@
 name: Release
 
+# release-plz drives everything. On each push to main it maintains a Release PR
+# (version bump + CHANGELOG). When that PR merges, release-plz cuts the tag and
+# GitHub Release; the build / asset / npm jobs below run in the SAME workflow
+# run, gated on `releases_created`. Keeping them in one run means the default
+# GITHUB_TOKEN is enough — we never rely on a token-created tag to trigger a
+# separate workflow (which GITHUB_TOKEN cannot do), so no PAT or App is needed.
+
 on:
   push:
-    tags:
-      - "v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to release (e.g. v0.1.0)"
-        required: true
+    branches: [main]
+
+# Least privilege by default; jobs opt into more where needed.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   BINARY_NAME: claude-quota-bar
 
 jobs:
+  release-plz:
+    name: release-plz
+    runs-on: ubuntu-latest
+    # Don't run the release machinery on forks.
+    if: github.repository == 'xrf9268-hue/claude-quota-bar'
+    permissions:
+      contents: write # create the tag, the release, and push the Release PR branch
+      pull-requests: write # open / update the Release PR
+      id-token: write # crates.io OIDC Trusted Publishing (release-plz exchanges it itself)
+    outputs:
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      releases: ${{ steps.release-plz.outputs.releases }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Run release-plz
+        id: release-plz
+        uses: release-plz/action@064f4d1e36c843611ddf013be726beaa4ad804db # v0.5.129
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   build:
     name: ${{ matrix.target }}
+    needs: release-plz
+    if: needs.release-plz.outputs.releases_created == 'true'
     runs-on: ${{ matrix.os }}
+    # Surface the matrix target as a shell env var so run-scripts never
+    # interpolate ${{ }} directly into bash (injection-safe + shellcheck-clean).
+    env:
+      TARGET: ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
@@ -57,14 +94,18 @@ jobs:
             mingw: true
 
     steps:
-      - uses: actions/checkout@v6
+      # Build the exact commit release-plz tagged, not the workflow's trigger
+      # SHA — they can differ if other commits land on main around the merge.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ fromJSON(needs.release-plz.outputs.releases)[0].tag }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.target }}
 
@@ -76,7 +117,7 @@ jobs:
 
       - name: Install cargo-zigbuild (cross-compile via Zig)
         if: matrix.use_zigbuild
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: "0.13.0"
 
@@ -86,25 +127,25 @@ jobs:
 
       - name: Build (zigbuild)
         if: matrix.use_zigbuild
-        run: cargo zigbuild --release --target ${{ matrix.target }}
+        run: cargo zigbuild --release --target "$TARGET"
 
       - name: Build (native)
         if: ${{ !matrix.use_zigbuild }}
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target "$TARGET"
 
       - name: Package (Unix)
         if: matrix.ext == 'tar.gz'
         run: |
           set -euo pipefail
           mkdir -p dist
-          bin="target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+          bin="target/$TARGET/release/$BINARY_NAME"
           # Strip symbols where the target toolchain supports it.
-          if command -v llvm-strip >/dev/null 2>&1 && [[ "${{ matrix.target }}" == *darwin* ]]; then
+          if command -v llvm-strip >/dev/null 2>&1 && [[ "$TARGET" == *darwin* ]]; then
             llvm-strip "$bin" || true
-          elif [[ "${{ matrix.target }}" == *linux* ]] && ! [[ "${{ matrix.target }}" == aarch64-* ]]; then
+          elif [[ "$TARGET" == *linux* ]] && ! [[ "$TARGET" == aarch64-* ]]; then
             strip "$bin" || true
           fi
-          name="${{ env.BINARY_NAME }}-${{ matrix.target }}"
+          name="$BINARY_NAME-$TARGET"
           tar -czf "dist/${name}.tar.gz" -C "$(dirname "$bin")" "$(basename "$bin")"
           ls -lh dist/
 
@@ -113,31 +154,32 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          bin="target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}.exe"
-          name="${{ env.BINARY_NAME }}-${{ matrix.target }}"
-          (cd "$(dirname "$bin")" && zip "${{ github.workspace }}/dist/${name}.zip" "$(basename "$bin")")
+          bin="target/$TARGET/release/$BINARY_NAME.exe"
+          name="$BINARY_NAME-$TARGET"
+          (cd "$(dirname "$bin")" && zip "$GITHUB_WORKSPACE/dist/${name}.zip" "$(basename "$bin")")
           ls -lh dist/
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
 
-  publish-github-release:
-    name: GitHub Release
-    needs: build
+  release-assets:
+    name: Attach binaries to release
+    needs: [release-plz, build]
+    if: needs.release-plz.outputs.releases_created == 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # upload assets to the release release-plz created
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          fetch-depth: 0
+          ref: ${{ fromJSON(needs.release-plz.outputs.releases)[0].tag }}
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts/
 
@@ -147,48 +189,31 @@ jobs:
           find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec mv {} release-assets/ \;
           ls -lh release-assets/
 
-      - name: Generate changelog (git-cliff)
-        uses: orhun/git-cliff-action@v4
-        with:
-          config: cliff.toml
-          args: --latest --strip header
+      - name: Upload assets to the release
         env:
-          OUTPUT: CHANGELOG_LATEST.md
-
-      - name: Resolve tag name
-        id: tag
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ steps.tag.outputs.name }}
-          name: ${{ steps.tag.outputs.name }}
-          body_path: CHANGELOG_LATEST.md
-          files: release-assets/*
-          draft: false
-          prerelease: false
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ fromJSON(needs.release-plz.outputs.releases)[0].tag }}
+        run: gh release upload "$TAG" release-assets/* --clobber
 
   publish-npm:
     name: Publish to NPM
-    needs: publish-github-release
+    needs: [release-plz, build]
+    if: needs.release-plz.outputs.releases_created == 'true'
     runs-on: ubuntu-latest
-    if: ${{ !github.event.repository.fork }}
-    # OIDC: GitHub Actions mints a short-lived token that npm exchanges
-    # for publish access via Trusted Publishing — no long-lived NPM_TOKEN
-    # stored in repo secrets.
+    # OIDC: GitHub Actions mints a short-lived token that npm exchanges for
+    # publish access via Trusted Publishing — no long-lived NPM_TOKEN stored
+    # in repo secrets.
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v6
+      # Publish the npm packages from the released tag so the version and
+      # bundled binaries match the GitHub Release exactly.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ fromJSON(needs.release-plz.outputs.releases)[0].tag }}
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           # Node 24 ships with npm 11+; OIDC trusted publishing needs ≥ 11.5.
           # We avoid `npm install -g npm@latest` because in-place npm upgrades
@@ -197,7 +222,7 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts/
 

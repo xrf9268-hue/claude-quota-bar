@@ -22,8 +22,8 @@ state, and `dir:branch *N` — at ~2.5ms cold start and a 459KB binary.
 # npm (recommended — works on any platform with Node ≥ 16)
 npm install -g claude-quota-bar
 
-# cargo
-cargo install --git https://github.com/xrf9268-hue/claude-quota-bar
+# cargo (compiles from source — npm ships a prebuilt binary, so it's faster)
+cargo install claude-quota-bar
 
 # pre-built binary (macOS arm64 example)
 curl -L https://github.com/xrf9268-hue/claude-quota-bar/releases/latest/download/claude-quota-bar-aarch64-apple-darwin.tar.gz | tar xz

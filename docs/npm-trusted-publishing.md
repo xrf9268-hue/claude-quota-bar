@@ -50,14 +50,9 @@ npm logout
 
 8 个包重复 4 次填表。建议用浏览器记录密码后批量复制粘贴。
 
-### 3. 测试发布
+### 3. 触发发布
 
-```sh
-git tag v0.1.0
-git push --tags
-```
-
-进 GitHub Actions → Release workflow → publish-npm 这一 job 应该用 OIDC 发布成功，不需要任何 `NPM_TOKEN` secret。
+发布不再手动打 tag。`release-plz` 在每次 push 到 `main` 时维护一个 **Release PR**（bump 版本 + 更新 `CHANGELOG.md`）；**合并那个 PR** 就会打 tag、建 GitHub Release，并在同一 workflow run 里跑 `publish-npm`（OIDC，无 `NPM_TOKEN`）。
 
 ## 验证
 
@@ -69,6 +64,24 @@ git push --tags
 - **CI 报 `403 npm-trusted-publisher-not-configured`**: 那个包的 Trusted Publisher 没配好，回到 step 2 检查 GH repo / workflow filename 完全一致
 - **CI 报 `OIDC token not found`**: workflow 漏了 `permissions: id-token: write`（已配，理论上不会触发）
 - **占位 0.0.0 一直留在 npm**: 不影响——`0.1.0 > 0.0.0`，用户 `npm install` 自动拿新版
+
+## crates.io Trusted Publishing（一次性）
+
+`release-plz` 也会把 crate 发到 crates.io。crates.io 同样支持 OIDC Trusted Publishing，且 release-plz 自己完成 token 交换——**不需要 `CARGO_REGISTRY_TOKEN`**，只需 release-plz job 有 `id-token: write`（已配）。
+
+一次性步骤：
+
+1. **Bootstrap 当前版本**：让 crate 先在 crates.io 存在于当前版本（`0.3.0`），这样 release-plz 的基线与现状一致，首次自动运行不会误判「未发布」而尝试重发 `0.3.0`（会和已存在的 `v0.3.0` tag 冲突）。本地一次：
+   ```sh
+   cargo login        # 临时 classic token，发完即可撤销
+   cargo publish      # 发布当前 Cargo.toml 版本到 crates.io
+   ```
+2. **配 Trusted Publisher**：crates.io 上 `claude-quota-bar` 的 **Settings → Trusted Publishing → Add**：
+   - **Repository owner**: `xrf9268-hue`
+   - **Repository name**: `claude-quota-bar`
+   - **Workflow filename**: `release.yml`
+   - **Environment**: 留空
+3. 之后所有 release 由 release-plz 经 OIDC 自动发布，无长期 token。
 
 ## 回退到经典 Token
 
