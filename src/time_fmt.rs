@@ -10,6 +10,65 @@ pub fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Upper bound on a believable `resets_at` countdown. The widest quota
+/// window is 7 days; anything past 90 days is treated as a bad value.
+const MAX_REASONABLE_RESET_SECS: u64 = 90 * 86400;
+
+/// Parse a fixed-shape UTC ISO-8601 timestamp (`YYYY-MM-DDTHH:MM:SS[.fff]Z`)
+/// to Unix seconds. Returns `None` on any structural deviation.
+///
+/// Claude Code writes exactly this shape into transcript lines, so a full
+/// RFC-3339 parser (and a dependency) would be overkill. The date→days math
+/// is Howard Hinnant's `days_from_civil`, valid across the Gregorian range.
+pub fn parse_iso8601_to_unix(s: &str) -> Option<u64> {
+    // Operate on bytes, not chars: a malformed timestamp with a multibyte
+    // char before a fixed offset (e.g. `202é-05-...`) would make `&s[4..5]`
+    // slice mid-char and panic, aborting the statusline. Byte indexing can't
+    // hit a char boundary, and the digit check below rejects any non-ASCII.
+    let b = s.as_bytes();
+    // Minimum "YYYY-MM-DDTHH:MM:SS" is 19 ASCII bytes.
+    if b.len() < 19 {
+        return None;
+    }
+    // Separators must sit exactly where the fixed format puts them.
+    if b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' {
+        return None;
+    }
+    // Parse a fixed-width run of ASCII digits; any non-digit byte (including
+    // the high bytes of a multibyte char) makes the whole timestamp invalid.
+    let field = |start: usize, len: usize| -> Option<i64> {
+        let mut v: i64 = 0;
+        for &c in &b[start..start + len] {
+            if !c.is_ascii_digit() {
+                return None;
+            }
+            v = v * 10 + i64::from(c - b'0');
+        }
+        Some(v)
+    };
+    let year = field(0, 4)?;
+    let month = field(5, 2)?;
+    let day = field(8, 2)?;
+    let hour = field(11, 2)?;
+    let min = field(14, 2)?;
+    let sec = field(17, 2)?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+
+    // days_from_civil: days since 1970-01-01 for a proleptic Gregorian date.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    let days = era * 146097 + doe - 719468;
+
+    let total = days * 86400 + hour * 3600 + min * 60 + sec;
+    u64::try_from(total).ok()
+}
+
 /// Format remaining time until a unix timestamp.
 ///
 /// Granularity ladders down as time gets shorter so the user sees the most
@@ -23,6 +82,12 @@ pub fn countdown(now: u64, resets_at: u64) -> String {
         return "--".to_string();
     }
     let secs = resets_at - now;
+    // Sanity cap: the longest legitimate window (7d) resets within ~7 days.
+    // A value beyond ~90 days is a bogus / sentinel `resets_at` — rendering
+    // "95141d14h" is worse than admitting "unknown".
+    if secs > MAX_REASONABLE_RESET_SECS {
+        return "--".to_string();
+    }
     if secs >= 86400 {
         let days = secs / 86400;
         let hours = (secs % 86400) / 3600;
@@ -109,6 +174,56 @@ mod tests {
         assert_eq!(countdown(0, 3600 + 45 * 60), "1h45m");
         assert_eq!(countdown(0, 86400), "1d");
         assert_eq!(countdown(0, 8 * 86400 + 3 * 3600), "8d3h");
+    }
+
+    #[test]
+    fn countdown_caps_absurd_resets_at() {
+        // A bogus far-future resets_at must not render "95141d14h".
+        assert_eq!(countdown(0, 9_999_999_999), "--");
+        // Just past the 90-day cap → unknown.
+        assert_eq!(countdown(0, 90 * 86400 + 1), "--");
+        // At the cap boundary → still rendered.
+        assert_eq!(countdown(0, 90 * 86400), "90d");
+    }
+
+    #[test]
+    fn iso8601_parses_canonical_utc() {
+        assert_eq!(
+            parse_iso8601_to_unix("2026-05-26T04:27:11.826Z"),
+            Some(1_779_769_631)
+        );
+        // Fractional seconds and the trailing Z are optional tail bytes.
+        assert_eq!(
+            parse_iso8601_to_unix("2026-05-26T04:27:11Z"),
+            Some(1_779_769_631)
+        );
+        // Unix epoch.
+        assert_eq!(parse_iso8601_to_unix("1970-01-01T00:00:00.000Z"), Some(0));
+    }
+
+    #[test]
+    fn iso8601_rejects_malformed() {
+        assert_eq!(parse_iso8601_to_unix(""), None);
+        assert_eq!(parse_iso8601_to_unix("not-a-timestamp"), None);
+        assert_eq!(parse_iso8601_to_unix("2026/05/26T04:27:11Z"), None); // wrong separators
+        assert_eq!(parse_iso8601_to_unix("2026-13-26T04:27:11Z"), None); // bad month
+        assert_eq!(parse_iso8601_to_unix("2026-05-26T25:27:11Z"), None); // bad hour
+    }
+
+    #[test]
+    fn iso8601_multibyte_char_does_not_panic() {
+        // Codex P2: a multibyte char before a fixed offset must be rejected,
+        // not panic on a mid-char byte slice. `é` is two bytes, so a naive
+        // `&s[4..5]` would split it and abort the statusline.
+        assert_eq!(parse_iso8601_to_unix("202é-05-26T04:27:11Z"), None);
+        assert_eq!(
+            parse_iso8601_to_unix("2026-05-26T04:27:11é"),
+            Some(1_779_769_631)
+        );
+        assert_eq!(
+            parse_iso8601_to_unix("日本語日本語日本語日本語日本語日本語日"),
+            None
+        );
     }
 
     #[test]

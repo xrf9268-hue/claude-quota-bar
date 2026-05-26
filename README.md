@@ -5,7 +5,7 @@ Battery-style 5-hour / 7-day quota bars, context-window indicator, prompt-cache
 state, and `dir:branch *N` — at ~2.5ms cold start and a 459KB binary.
 
 ```
-5h[███42%░░░░]⏰26m | 7d[███35%░░░░]⏰8d3h | Opus 4.7(71.0k/200.0k) | proj:main *3
+5h[███42%░░░░]⏰26m | 7d[███35%░░░░]⏰8d3h | Opus 4.7(71.0k/200.0k) | cache 4m12s | proj:main *3
 ```
 
 ## Why this and not the Python ones
@@ -51,7 +51,7 @@ Default layout: `5h,7d,model,cache,dir`.
 | `5h`    | `rate_limits.five_hour` | Battery bar with `%` inside, plus `⏰` countdown to reset |
 | `7d`    | `rate_limits.seven_day` | Same, weekly window |
 | `model` | `model` + `context_window` | `Opus 4.7(71k/200k)` — model + ctx tokens used / window |
-| `cache` | transcript scan | Prompt-cache TTL remaining or `COLD` (not yet wired in v0.1) |
+| `cache` | transcript scan | Time left on the prompt cache (`4m12s`), or `COLD` once it has expired |
 | `dir`   | `workspace.current_dir` + git | `proj:main *3 ↑1 ↓2` — dir, branch, dirty count, ahead/behind |
 
 When Anthropic hasn't yet shipped `rate_limits` (first few renders of a fresh
@@ -66,6 +66,7 @@ Configured via environment variables:
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `STATUSLINE_LAYOUT` | `5h,7d,model,cache,dir` | Comma-separated segment names (order matters) |
+| `STATUSLINE_CACHE_TTL` | `3600` | Prompt-cache lifetime in seconds. The default assumes the 1-hour extended cache that Claude.ai Pro/Max accounts get automatically; set `300` for the standard 5-minute cache. The active TTL isn't exposed to the statusline, so it can't be auto-detected. |
 | `NO_COLOR` | unset | If set, strips all ANSI — falls back to `█`/`░` glyphs |
 
 Severity thresholds (green / yellow / red) flip at 30% and 70% quota used.

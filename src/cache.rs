@@ -31,16 +31,23 @@ fn now() -> u64 {
 }
 
 /// Persist stdin to disk so the next render can recover rate_limits when
-/// Claude Code ships partial payloads. Only writes when the payload
-/// actually carries rate-limit data; otherwise we'd overwrite a useful
-/// snapshot with an empty one.
+/// Claude Code ships partial payloads. The cache is global per-machine: it's
+/// account-level quota, intentionally shared across this user's sessions so a
+/// freshly-opened terminal isn't blank.
+///
+/// Two guards before writing:
+/// - the payload must carry rate-limit data (else we'd clobber a useful
+///   snapshot with an empty one);
+/// - the payload must look like it came from Claude Code (`session_id`
+///   present), so a hand-run invocation or unrelated script piping JSON
+///   can't poison the bar every terminal reads.
 pub fn maybe_save(input: &Input, raw: &str) -> Result<()> {
     let has_data = input
         .rate_limits
         .as_ref()
         .map(|r| r.five_hour.is_some() || r.seven_day.is_some())
         .unwrap_or(false);
-    if !has_data {
+    if !has_data || input.session_id.is_empty() {
         return Ok(());
     }
     let path = cache_path();
@@ -69,12 +76,17 @@ pub fn fill_from_cache(input: &mut Input) {
         Ok(m) => m,
         Err(_) => return,
     };
-    if let Ok(modified) = meta.modified() {
-        if let Ok(elapsed) = modified.elapsed() {
-            if elapsed.as_secs() > STALE_AFTER_SECS {
-                return;
-            }
-        }
+    // Refuse the cache unless we can positively prove it's fresh. If the
+    // mtime is unreadable, or `elapsed()` errors because the mtime is in the
+    // future (clock skew / NTP step), we can't establish freshness — treat
+    // that as stale rather than falling through and trusting a stale value.
+    let fresh = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .is_some_and(|e| e.as_secs() <= STALE_AFTER_SECS);
+    if !fresh {
+        return;
     }
     let raw = match std::fs::read_to_string(&path) {
         Ok(r) => r,
@@ -172,7 +184,7 @@ mod tests {
     fn fill_from_cache_hydrates_rate_limits() {
         with_temp_home(|_| {
             let payload = format!(
-                r#"{{"rate_limits":{{"five_hour":{{"used_percentage":42,"resets_at":{}}}}}}}"#,
+                r#"{{"session_id":"s","rate_limits":{{"five_hour":{{"used_percentage":42,"resets_at":{}}}}}}}"#,
                 now() + 600
             );
             let cached: Input = serde_json::from_str(&payload).unwrap();
@@ -190,7 +202,7 @@ mod tests {
     fn fill_from_cache_does_not_hydrate_context_window() {
         with_temp_home(|_| {
             let payload = format!(
-                r#"{{"rate_limits":{{"five_hour":{{"used_percentage":42,"resets_at":{}}}}},"context_window":{{"context_window_size":999999}}}}"#,
+                r#"{{"session_id":"s","rate_limits":{{"five_hour":{{"used_percentage":42,"resets_at":{}}}}},"context_window":{{"context_window_size":999999}}}}"#,
                 now() + 600
             );
             let cached: Input = serde_json::from_str(&payload).unwrap();
@@ -211,13 +223,13 @@ mod tests {
     fn maybe_save_skips_when_no_rate_limits() {
         with_temp_home(|home| {
             let original = format!(
-                r#"{{"rate_limits":{{"five_hour":{{"used_percentage":42,"resets_at":{}}}}}}}"#,
+                r#"{{"session_id":"s","rate_limits":{{"five_hour":{{"used_percentage":42,"resets_at":{}}}}}}}"#,
                 now() + 600
             );
             let original_input: Input = serde_json::from_str(&original).unwrap();
             maybe_save(&original_input, &original).unwrap();
 
-            let empty = "{}";
+            let empty = r#"{"session_id":"s"}"#;
             let empty_input: Input = serde_json::from_str(empty).unwrap();
             maybe_save(&empty_input, empty).unwrap();
 
@@ -226,6 +238,27 @@ mod tests {
             assert!(
                 actual.contains("42"),
                 "cache was corrupted by empty payload: {actual:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn maybe_save_skips_without_session_id() {
+        with_temp_home(|home| {
+            // rate_limits present but no session_id → not Claude Code; must
+            // not write, so a hand-run / unrelated script can't poison the
+            // cache every terminal reads.
+            let payload = format!(
+                r#"{{"rate_limits":{{"five_hour":{{"used_percentage":77,"resets_at":{}}}}}}}"#,
+                now() + 600
+            );
+            let input: Input = serde_json::from_str(&payload).unwrap();
+            maybe_save(&input, &payload).unwrap();
+
+            let path = home.path().join(".cache/claude-quota-bar/last_stdin.json");
+            assert!(
+                !path.exists(),
+                "cache must not be written without a session_id"
             );
         });
     }

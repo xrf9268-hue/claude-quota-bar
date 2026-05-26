@@ -7,6 +7,7 @@
 //! the API saw — sum `input_tokens + cache_read_input_tokens +
 //! cache_creation_input_tokens` from the last non-sidechain, non-error line.
 
+use crate::time_fmt::parse_iso8601_to_unix;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -26,6 +27,12 @@ struct TranscriptLine {
     is_api_error_message: bool,
     #[serde(default)]
     message: Option<Message>,
+    /// ISO-8601 wall-clock time the line was written (e.g.
+    /// `2026-05-26T04:27:11.826Z`). Undocumented internal field — treated
+    /// as best-effort: absent or unparseable yields `None` and the cache
+    /// segment simply hides rather than showing a wrong value.
+    #[serde(default)]
+    timestamp: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -44,15 +51,32 @@ struct Usage {
     cache_creation_input_tokens: u64,
 }
 
+/// What the last qualifying transcript line tells us: the model's view of
+/// context tokens used, and when that turn happened (for prompt-cache age).
+#[derive(Debug, Default, PartialEq)]
+pub struct LastUsage {
+    pub tokens: u64,
+    /// Unix seconds parsed from the line's `timestamp`. `None` when the
+    /// field is absent or unparseable — the caller hides the cache segment.
+    pub timestamp_unix: Option<u64>,
+}
+
 /// Sum the three input-side token fields from the last qualifying transcript
 /// line. Returns `None` when the file is absent, empty, no qualifying line
 /// is found, or every qualifying line sums to zero — a zero total means
 /// "no data captured yet", not "context usage is genuinely zero".
 pub fn last_usage_tokens(path: &str) -> Option<u64> {
-    last_usage_tokens_with_window(path, TAIL_WINDOW_BYTES)
+    last_usage(path).map(|u| u.tokens)
 }
 
-fn last_usage_tokens_with_window(path: &str, window: u64) -> Option<u64> {
+/// Like [`last_usage_tokens`] but also returns the qualifying line's
+/// wall-clock timestamp so the renderer can show prompt-cache age. The token
+/// rules are identical (the same line supplies both values).
+pub fn last_usage(path: &str) -> Option<LastUsage> {
+    last_usage_with_window(path, TAIL_WINDOW_BYTES)
+}
+
+fn last_usage_with_window(path: &str, window: u64) -> Option<LastUsage> {
     let mut file = File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
     if size == 0 {
@@ -105,8 +129,8 @@ fn last_usage_tokens_with_window(path: &str, window: u64) -> Option<u64> {
         if parsed.is_sidechain || parsed.is_api_error_message {
             continue;
         }
-        if let Some(msg) = parsed.message
-            && let Some(u) = msg.usage
+        if let Some(msg) = &parsed.message
+            && let Some(u) = &msg.usage
         {
             // Saturating arithmetic removes a theoretical panic / wrap on
             // adversarial input; it is essentially free at runtime.
@@ -115,7 +139,11 @@ fn last_usage_tokens_with_window(path: &str, window: u64) -> Option<u64> {
                 .saturating_add(u.cache_read_input_tokens)
                 .saturating_add(u.cache_creation_input_tokens);
             if sum > 0 {
-                return Some(sum);
+                let timestamp_unix = parsed.timestamp.as_deref().and_then(parse_iso8601_to_unix);
+                return Some(LastUsage {
+                    tokens: sum,
+                    timestamp_unix,
+                });
             }
         }
     }
@@ -239,7 +267,7 @@ mod tests {
         // minus window equals pad_len.
         let window = total - pad_len as u64;
         assert_eq!(
-            last_usage_tokens_with_window(f.path().to_str().unwrap(), window),
+            last_usage_with_window(f.path().to_str().unwrap(), window).map(|u| u.tokens),
             Some(4242)
         );
     }
@@ -316,6 +344,28 @@ mod tests {
             r#"{"isSidechain":true,"message":{"usage":{"input_tokens":999999,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
         ]);
         assert_eq!(last_usage_tokens(f.path().to_str().unwrap()), Some(100));
+    }
+
+    #[test]
+    fn last_usage_parses_timestamp_from_qualifying_line() {
+        // 2026-05-26T04:27:11Z → 1779769631 unix seconds.
+        let f = write_jsonl(&[
+            r#"{"timestamp":"2026-05-26T04:27:11.826Z","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+        ]);
+        let u = last_usage(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(u.tokens, 100);
+        assert_eq!(u.timestamp_unix, Some(1_779_769_631));
+    }
+
+    #[test]
+    fn last_usage_tolerates_missing_timestamp() {
+        // No `timestamp` field → tokens still resolve, age is unknown.
+        let f = write_jsonl(&[
+            r#"{"message":{"usage":{"input_tokens":42,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}"#,
+        ]);
+        let u = last_usage(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(u.tokens, 42);
+        assert_eq!(u.timestamp_unix, None);
     }
 
     #[test]

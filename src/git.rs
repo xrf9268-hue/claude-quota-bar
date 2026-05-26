@@ -87,9 +87,9 @@ fn write_cache(path: &Path, cwd: &str, info: &Option<GitInfo>) {
 }
 
 fn run_git(cwd: &str) -> Option<GitInfo> {
-    // Quick check: is this a git repo at all? Avoids spawning the heavier
-    // `status` call when we'll get an error anyway.
-    if !Path::new(cwd).join(".git").exists() {
+    // Quick check: is this inside a work tree at all? Avoids spawning the
+    // heavier `status` call when we'll get an error anyway.
+    if !in_work_tree(cwd) {
         return None;
     }
 
@@ -109,6 +109,22 @@ fn run_git(cwd: &str) -> Option<GitInfo> {
         return None;
     }
     parse_status(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Is `cwd` inside a git work tree? Walk up the ancestor chain looking for a
+/// `.git` entry — present as a directory in a normal clone, or as a *file* in
+/// a worktree / submodule. The old `cwd/.git` check only matched when `cwd`
+/// was the repo root, so launching Claude Code from a subdirectory silently
+/// dropped the whole git segment. Pure filesystem walk — no extra process.
+fn in_work_tree(cwd: &str) -> bool {
+    let mut dir: Option<&Path> = Some(Path::new(cwd));
+    while let Some(d) = dir {
+        if d.join(".git").exists() {
+            return true;
+        }
+        dir = d.parent();
+    }
+    false
 }
 
 fn parse_status(out: &str) -> Option<GitInfo> {
@@ -344,6 +360,38 @@ fn run_with_timeout(cmd: &mut Command, timeout_ms: u64) -> Option<std::process::
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn in_work_tree_true_at_root_and_subdirs() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir(root.join(".git")).unwrap(); // normal clone: .git is a dir
+        let deep = root.join("src").join("nested");
+        fs::create_dir_all(&deep).unwrap();
+
+        assert!(in_work_tree(root.to_str().unwrap()));
+        assert!(in_work_tree(root.join("src").to_str().unwrap()));
+        assert!(in_work_tree(deep.to_str().unwrap()));
+    }
+
+    #[test]
+    fn in_work_tree_handles_dotgit_file_form() {
+        // Worktrees and submodules store `.git` as a file, not a directory.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::write(root.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        let sub = root.join("a").join("b");
+        fs::create_dir_all(&sub).unwrap();
+        assert!(in_work_tree(sub.to_str().unwrap()));
+    }
+
+    #[test]
+    fn in_work_tree_false_outside_repo() {
+        let tmp = TempDir::new().unwrap();
+        assert!(!in_work_tree(tmp.path().to_str().unwrap()));
+    }
 
     #[test]
     fn parse_basic_branch() {
