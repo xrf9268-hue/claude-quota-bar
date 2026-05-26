@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.3.0...v0.3.1) - 2026-05-26
+
+### Other
+
+- automate releases with release-plz + crates.io/npm trusted publishing ([#6](https://github.com/xrf9268-hue/claude-quota-bar/pull/6))
+
 ## [0.3.0] - 2026-05-26
 
 Runtime analysis of v0.2.0 found six gaps between tested units and shipped
