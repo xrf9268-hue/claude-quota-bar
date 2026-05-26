@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.2](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.3.1...v0.3.2) - 2026-05-26
+
+### Other
+
+- add RELEASING.md and refresh stale README figures ([#8](https://github.com/xrf9268-hue/claude-quota-bar/pull/8))
+
 ## [0.3.1](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.3.0...v0.3.1) - 2026-05-26
 
 ### Other
