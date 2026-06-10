@@ -8,11 +8,15 @@
 Rust statusline binary for [Claude Code](https://github.com/anthropics/claude-code).
 Reads a JSON payload on stdin once per render, prints a colored line on stdout,
 exits. Single-purpose: surface 5h/7d rate-limit quota, context-window usage,
-prompt-cache state, and `dir:branch *N`.
+and `dir:branch *N`.
+
+We target the latest Claude Code only (≥ 2.1.132, where stdin's
+`context_window.total_input_tokens` means current context occupancy). No
+backward-compat shims for older stdin semantics.
 
 - Edition 2024, MSRV 1.85.
-- 3 runtime deps: `serde`, `serde_json`, `anyhow`. Do not add more without a
-  written justification — the binary is currently 460KB stripped and we want to
+- 2 runtime deps: `serde`, `serde_json`. Do not add more without a written
+  justification — the binary is currently 460KB stripped and we want to
   keep it there.
 - Library + binary split. `main.rs` does all I/O; `render.rs` is a pure
   function over a `Context`. Tests stay fast because of this.
@@ -70,13 +74,15 @@ These are the load-bearing decisions that aren't obvious from reading code:
    synthesize a 0% reset value — that's a lie. The renderer shows `--%` when
    data is unknown; that's the honest UX.
 
-3. **`fill_from_cache` only hydrates `rate_limits`**, not `context_window` or
-   `transcript_path`. The cache is global per machine; ctx/transcript belong
-   to a specific session and would render stale data across sessions.
+3. **`fill_from_cache` only hydrates `rate_limits`**, not `context_window`.
+   The cache is global per machine; context state belongs to a specific
+   session and would render stale token counts across sessions.
 
-4. **Statusline must not crash the parent.** `main::run` returns `Result`, but
-   `main::main` swallows errors to stderr. Claude Code reads stdout — a crash
-   shows up as a blank statusline (annoying) instead of a panic (broken).
+4. **Statusline must not crash the parent.** There is deliberately no
+   `?`-propagation in `main` — every fallible step degrades in place
+   (invalid stdin → defaults, cache I/O errors ignored). Claude Code reads
+   stdout — a crash shows up as a blank statusline (annoying) instead of a
+   panic (broken).
 
 5. **Bar text must use two fg colors.** `text_on_filled` (dark) overlaid on
    the light severity cells, `text_on_empty` (light) overlaid on the dark
@@ -86,12 +92,24 @@ These are the load-bearing decisions that aren't obvious from reading code:
    `partial_bar_uses_dark_text_on_filled_and_light_text_on_empty` in
    `progress.rs`.
 
-6. **Context-token precedence** in `render::build_model`:
-   `Context.transcript_tokens` (from `main.rs` reading the JSONL) → stdin
-   `total_input_tokens` → 20k baseline. Stdin under-counts by ~10–15k
-   (anthropics/claude-code#22955). Don't add `total_output_tokens` to the
-   sum — the last assistant message's input already includes the prior
-   output. Treat a zero transcript sum as `None`, not `Some(0)`.
+6. **Context-token source** in `render::build_model`: stdin
+   `total_input_tokens` → 20k baseline. Since Claude Code 2.1.132 stdin's
+   `total_input_tokens` is the full current-context sum (`input +
+   cache_creation + cache_read` of the most recent API response) — the old
+   transcript-JSONL scan that compensated for stdin under-counting
+   (anthropics/claude-code#22955) was removed along with the prompt-cache
+   segment. Don't add output tokens to the sum — the last assistant
+   message's input already includes the prior output. A zero stdin sum
+   means "no API turn yet": render the `~20k` baseline, never a bare 0.
+   A sum larger than the window itself is the pre-2.1.132 cumulative
+   total leaking through an old Claude Code: render `--`, never a
+   confident wrong number.
+
+7. **A layout with no recognized segment falls back to `DEFAULT_LAYOUT`**
+   (`render::render`). A stale `STATUSLINE_LAYOUT=cache` from before that
+   segment was removed must not blank the statusline on every prompt; a
+   recognized segment that legitimately hides (`dir` with empty cwd) still
+   renders empty.
 
 ## Release process
 
@@ -124,6 +142,10 @@ We intentionally don't:
 - Add multiple visual "styles". One good design only.
 - Add vim mode, cost, lines, API perf segments. Those were why the predecessor
   felt cluttered.
+- Re-add the prompt-cache (`cache 4m12s`/`COLD`) segment. The TTL isn't
+  exposed to the statusline so the countdown was a guess, and it froze
+  exactly when it mattered (idle periods, unless `refreshInterval` is set).
+- Support pre-2.1.132 Claude Code stdin semantics.
 
 If you think one of these has changed, open an issue first.
 
@@ -140,7 +162,6 @@ src/
 ├── time_fmt.rs    # countdown formatting, token compaction (1.2k / 1.5M)
 ├── render.rs      # pure composition; takes Context, returns String
 ├── git.rs         # shells out to git with 1s timeout + 5s cache
-├── transcript.rs  # JSONL scan for last non-sidechain usage tokens
 └── cache.rs       # ~/.cache/claude-quota-bar/last_stdin.json hydration
 tests/
 └── integration.rs # assert_cmd snapshot tests of the full binary

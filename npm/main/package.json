@@ -1,7 +1,7 @@
 {
   "name": "claude-quota-bar",
   "version": "0.1.0",
-  "description": "Fast Rust statusline for Claude Code — battery-bar 5h/7d quota, ctx, cache age, git",
+  "description": "Fast Rust statusline for Claude Code — battery-bar 5h/7d quota, ctx, git",
   "keywords": ["claude", "statusline", "cli", "terminal", "anthropic"],
   "license": "MIT",
   "repository": {

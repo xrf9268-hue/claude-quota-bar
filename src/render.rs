@@ -9,14 +9,14 @@ use crate::progress::battery_bar;
 use crate::theme::Theme;
 use crate::time_fmt::{countdown, fmt_tokens};
 
-pub const DEFAULT_LAYOUT: &[&str] = &["5h", "7d", "model", "cache", "dir"];
+pub const DEFAULT_LAYOUT: &[&str] = &["5h", "7d", "model", "dir"];
 pub const BAR_WIDTH: usize = 10;
 pub const BRANCH_MAX_LEN: usize = 25;
 /// Cap on the single-dirty-file path width. Past this, fall back to `*1`
 /// so the statusline doesn't get blown out by paths like `tests/.../foo`.
 pub const DIRTY_FILE_MAX_LEN: usize = 30;
-/// Fallback context-usage estimate when neither the transcript nor stdin
-/// reports a usable token count. Covers the system prompt (~3k) + tools
+/// Fallback context-usage estimate when stdin doesn't yet report a usable
+/// token count. Covers the system prompt (~3k) + tools
 /// (~15k) + CLAUDE.md (~300) that load before the first user turn, so the
 /// bar never starts at a misleading 0%.
 const BASELINE_TOKENS: u64 = 20_000;
@@ -25,13 +25,8 @@ pub struct Context<'a> {
     pub input: &'a Input,
     pub theme: &'a Theme,
     pub now_unix: u64,
-    pub cache_state: Option<String>,
     pub git_info: Option<&'a GitInfo>,
     pub layout: &'a [String],
-    /// Pre-resolved context-token count from the transcript JSONL. The
-    /// renderer is pure — `main.rs` calls `transcript::last_usage_tokens`
-    /// before constructing the `Context` and threads the result through here.
-    pub transcript_tokens: Option<u64>,
 }
 
 pub fn render(ctx: &Context) -> String {
@@ -39,9 +34,23 @@ pub fn render(ctx: &Context) -> String {
     let r = reset();
     let sep = format!("{mute} | {r}");
 
+    // A layout with no recognized segment name (e.g. a stale cache-only
+    // STATUSLINE_LAYOUT from before that segment was removed) would render
+    // a blank line every prompt with no diagnostic — fall back to the
+    // default layout instead. A recognized segment that legitimately hides
+    // (dir with an empty cwd) still yields empty output.
+    let recognized = ctx
+        .layout
+        .iter()
+        .any(|s| DEFAULT_LAYOUT.contains(&s.as_str()));
     let mut parts: Vec<String> = Vec::new();
-    for seg in ctx.layout {
-        if let Some(rendered) = build_segment(seg.as_str(), ctx) {
+    let names: &mut dyn Iterator<Item = &str> = if recognized {
+        &mut ctx.layout.iter().map(String::as_str)
+    } else {
+        &mut DEFAULT_LAYOUT.iter().copied()
+    };
+    for seg in names {
+        if let Some(rendered) = build_segment(seg, ctx) {
             if !rendered.is_empty() {
                 parts.push(rendered);
             }
@@ -55,7 +64,6 @@ fn build_segment(name: &str, ctx: &Context) -> Option<String> {
         "5h" => Some(build_window(ctx, "5h", window_5h(ctx.input))),
         "7d" => Some(build_window(ctx, "7d", window_7d(ctx.input))),
         "model" => Some(build_model(ctx)),
-        "cache" => build_cache(ctx),
         "dir" => build_dir(ctx),
         _ => None,
     }
@@ -90,32 +98,25 @@ fn build_model(ctx: &Context) -> String {
     let r = reset();
     match &ctx.input.context_window {
         Some(cw) if cw.context_window_size > 0 => {
-            let (used, baseline) = match ctx.transcript_tokens {
-                Some(n) => (n, false),
-                None if cw.total_input_tokens > 0 => (cw.total_input_tokens, false),
-                None => (BASELINE_TOKENS, true),
+            // `total_input_tokens` is the current context occupancy (input +
+            // cache reads + cache writes of the most recent API response,
+            // Claude Code >= 2.1.132). Zero means "no API turn yet" — show
+            // the ~20k baseline rather than a misleading 0. A count larger
+            // than the window itself can't be a real occupancy (it's the
+            // pre-2.1.132 cumulative-session total leaking through an old
+            // Claude Code) — show "--" rather than a confident wrong number.
+            let used_text = if cw.total_input_tokens > cw.context_window_size {
+                "--".to_string()
+            } else if cw.total_input_tokens > 0 {
+                fmt_tokens(cw.total_input_tokens)
+            } else {
+                format!("~{}", fmt_tokens(BASELINE_TOKENS))
             };
-            let used_text = fmt_tokens(used);
-            let prefix = if baseline { "~" } else { "" };
             let win_text = fmt_tokens(cw.context_window_size);
-            format!(
-                "{model_color}{name}{r}{mute}({r}{prefix}{used_text}{mute}/{r}{win_text}{mute}){r}"
-            )
+            format!("{model_color}{name}{r}{mute}({r}{used_text}{mute}/{r}{win_text}{mute}){r}")
         }
         _ => format!("{model_color}{name}{r}"),
     }
-}
-
-fn build_cache(ctx: &Context) -> Option<String> {
-    let state = ctx.cache_state.as_ref()?;
-    let mute = fg(ctx.theme.mute);
-    let ink = fg(ctx.theme.ink);
-    let warn = fg(ctx.theme.warn);
-    let r = reset();
-    // Color the state by urgency: COLD is the warning color so the user
-    // notices at a glance the cache has rolled.
-    let state_fg = if state == "COLD" { &warn } else { &ink };
-    Some(format!("{mute}cache{r} {state_fg}{state}{r}"))
 }
 
 fn build_dir(ctx: &Context) -> Option<String> {
@@ -193,10 +194,8 @@ mod tests {
             input,
             theme: &GRAPHITE,
             now_unix: 1_700_000_000,
-            cache_state: None,
             git_info: git,
             layout,
-            transcript_tokens: None,
         }
     }
 
@@ -220,10 +219,8 @@ mod tests {
                 }),
             }),
             context_window: Some(ContextWindow {
-                used_percentage: Some(35.5),
                 context_window_size: 200_000,
                 total_input_tokens: 65_000,
-                total_output_tokens: 6_000,
             }),
             ..Default::default()
         }
@@ -280,29 +277,12 @@ mod tests {
     }
 
     #[test]
-    fn build_model_uses_context_transcript_tokens() {
-        no_color(|| {
-            let inp = full_input();
-            let lay = layout(&["model"]);
-            let mut c = ctx(&inp, &lay, None);
-            c.transcript_tokens = Some(99_000);
-            let out = strip_ansi(&render(&c));
-            assert!(
-                out.contains("99.0k"),
-                "expected transcript-derived 99.0k in {out:?}"
-            );
-            assert!(!out.contains("65.0k"), "stdin value leaked: {out:?}");
-        });
-    }
-
-    #[test]
-    fn model_shows_baseline_when_transcript_missing_and_stdin_zero() {
+    fn model_shows_baseline_when_stdin_tokens_zero() {
         no_color(|| {
             let mut inp = full_input();
-            // Fresh session: no transcript yet, stdin context_window present
-            // but total_input_tokens still 0 — display the ~20k baseline so
+            // Fresh session: stdin context_window present but
+            // total_input_tokens still 0 — display the ~20k baseline so
             // users see the system prompt + tools load, not a misleading 0.
-            inp.transcript_path = String::new();
             if let Some(cw) = inp.context_window.as_mut() {
                 cw.total_input_tokens = 0;
             }
@@ -317,20 +297,48 @@ mod tests {
     }
 
     #[test]
-    fn model_shows_input_tokens_only_not_input_plus_output() {
+    fn model_shows_stdin_total_input_tokens() {
         no_color(|| {
             let inp = full_input();
             let lay = layout(&["model"]);
             let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
-            // 65k input + 6k output — we now display only input (the
-            // last assistant message's `input_tokens` already includes the
-            // prior turn's output, so adding output_tokens would double-count).
+            // `total_input_tokens` already includes cache reads/writes and
+            // the prior turn's output — display it as-is.
             assert!(out.contains("65.0k"), "expected 65.0k in {out:?}");
-            assert!(
-                !out.contains("71.0k"),
-                "input+output sum leaked into output: {out:?}"
-            );
             assert!(out.contains("200.0k"), "missing window size in {out:?}");
+        });
+    }
+
+    #[test]
+    fn model_shows_unknown_when_tokens_exceed_window() {
+        no_color(|| {
+            let mut inp = full_input();
+            // A count larger than the window itself can't be a real
+            // occupancy — that's the pre-2.1.132 cumulative-session
+            // semantics leaking through. Show "--", not a confident lie.
+            if let Some(cw) = inp.context_window.as_mut() {
+                cw.total_input_tokens = 1_500_000;
+            }
+            let lay = layout(&["model"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(out.contains("--/200.0k"), "expected --/200.0k in {out:?}");
+            assert!(!out.contains("1.5M"), "bogus count leaked: {out:?}");
+        });
+    }
+
+    #[test]
+    fn model_allows_exactly_full_window() {
+        no_color(|| {
+            let mut inp = full_input();
+            if let Some(cw) = inp.context_window.as_mut() {
+                cw.total_input_tokens = 200_000;
+            }
+            let lay = layout(&["model"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(
+                out.contains("200.0k/200.0k"),
+                "a 100%-full window is legitimate: {out:?}"
+            );
         });
     }
 
@@ -447,29 +455,6 @@ mod tests {
     }
 
     #[test]
-    fn cache_segment_shows_state() {
-        no_color(|| {
-            let inp = full_input();
-            let lay = layout(&["cache"]);
-            let mut c = ctx(&inp, &lay, None);
-            c.cache_state = Some("2m45s".into());
-            let out = strip_ansi(&render(&c));
-            assert!(out.contains("cache"));
-            assert!(out.contains("2m45s"));
-        });
-    }
-
-    #[test]
-    fn cache_segment_hidden_when_no_state() {
-        no_color(|| {
-            let inp = full_input();
-            let lay = layout(&["cache"]);
-            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
-            assert_eq!(out, "");
-        });
-    }
-
-    #[test]
     fn segments_separated_by_pipe() {
         no_color(|| {
             let inp = full_input();
@@ -543,14 +528,35 @@ mod tests {
     }
 
     #[test]
-    fn cold_cache_state_renders() {
+    fn removed_cache_segment_in_layout_is_skipped() {
         no_color(|| {
+            // Users with a stale STATUSLINE_LAYOUT still listing "cache"
+            // must get the other segments, not a crash or a stray label.
+            let inp = full_input();
+            let lay = layout(&["cache", "5h"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(out.contains("42%"));
+            assert!(
+                !out.contains("cache"),
+                "stale cache segment leaked: {out:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn layout_with_no_known_segment_falls_back_to_default() {
+        no_color(|| {
+            // A layout made entirely of unknown names (e.g. a stale
+            // cache-only STATUSLINE_LAYOUT from before the segment was
+            // removed) must not blank the statusline.
             let inp = full_input();
             let lay = layout(&["cache"]);
-            let mut c = ctx(&inp, &lay, None);
-            c.cache_state = Some("COLD".into());
-            let out = strip_ansi(&render(&c));
-            assert!(out.contains("COLD"));
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(out.contains("42%"), "expected default fallback: {out:?}");
+            assert!(
+                out.contains("Opus 4.7"),
+                "expected default fallback: {out:?}"
+            );
         });
     }
 }

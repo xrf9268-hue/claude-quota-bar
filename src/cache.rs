@@ -10,7 +10,6 @@
 //! reader signals "unknown" (None) so the renderer falls back to "--%".
 
 use crate::input::{Input, RateLimits, Window};
-use anyhow::Result;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -41,7 +40,7 @@ fn now() -> u64 {
 /// - the payload must look like it came from Claude Code (`session_id`
 ///   present), so a hand-run invocation or unrelated script piping JSON
 ///   can't poison the bar every terminal reads.
-pub fn maybe_save(input: &Input, raw: &str) -> Result<()> {
+pub fn maybe_save(input: &Input, raw: &str) -> std::io::Result<()> {
     let has_data = input
         .rate_limits
         .as_ref()
@@ -105,10 +104,9 @@ pub fn fill_from_cache(input: &mut Input) {
     if limits.five_hour.is_some() || limits.seven_day.is_some() {
         input.rate_limits = Some(limits);
     }
-    // Deliberately do NOT hydrate context_window / transcript_path: the
-    // cache is global per-machine, not per-session, so reusing those
-    // fields across sessions renders stale token counts and points cache
-    // age at the wrong transcript.
+    // Deliberately do NOT hydrate context_window: the cache is global
+    // per-machine, not per-session, so reusing it across sessions renders
+    // stale token counts.
 }
 
 fn rollover(window: Option<Window>, now_unix: u64) -> Option<Window> {
