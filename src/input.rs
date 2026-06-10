@@ -1,14 +1,13 @@
-//! Parse Claude Code stdin JSON.
+//! Parse Claude Code stdin JSON. Only the fields the renderer consumes are
+//! declared; serde ignores the rest of the payload.
 //!
 //! Every field is optional via `#[serde(default)]` because Claude Code
 //! ships a partial payload during the first few renders of a fresh session
-//! (no `rate_limits`, no `cost`). The renderer falls back to placeholders.
+//! (no `rate_limits`). The renderer falls back to placeholders.
 
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use std::io::Read;
+use serde::Deserialize;
 
-#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct Input {
     #[serde(default)]
     pub session_id: String,
@@ -17,18 +16,12 @@ pub struct Input {
     #[serde(default)]
     pub workspace: Workspace,
     #[serde(default)]
-    pub cost: Cost,
-    #[serde(default)]
     pub context_window: Option<ContextWindow>,
     #[serde(default)]
     pub rate_limits: Option<RateLimits>,
-    #[serde(default)]
-    pub transcript_path: String,
-    #[serde(default)]
-    pub version: String,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct Model {
     #[serde(default)]
     pub id: String,
@@ -48,33 +41,24 @@ impl Model {
     }
 }
 
-#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct Workspace {
     #[serde(default)]
     pub current_dir: String,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize, Clone)]
-pub struct Cost {
-    #[serde(default)]
-    pub total_cost_usd: f64,
-    #[serde(default)]
-    pub total_duration_ms: u64,
-}
-
-#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct ContextWindow {
     #[serde(default)]
-    pub used_percentage: Option<f64>,
-    #[serde(default)]
     pub context_window_size: u64,
+    /// Tokens currently in the context window: `input + cache_creation +
+    /// cache_read` of the most recent API response (Claude Code >= 2.1.132;
+    /// older versions shipped a cumulative session total here).
     #[serde(default)]
     pub total_input_tokens: u64,
-    #[serde(default)]
-    pub total_output_tokens: u64,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct RateLimits {
     #[serde(default)]
     pub five_hour: Option<Window>,
@@ -82,7 +66,7 @@ pub struct RateLimits {
     pub seven_day: Option<Window>,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize, Clone)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct Window {
     #[serde(default)]
     pub used_percentage: f64,
@@ -90,22 +74,11 @@ pub struct Window {
     pub resets_at: Option<u64>,
 }
 
-/// Read JSON from stdin. Returns `None` when stdin is empty (e.g. running
-/// the binary by hand from a TTY) so the caller can render a "no stdin"
-/// placeholder rather than crashing.
-pub fn read_from_stdin() -> Result<Option<Input>> {
-    let mut buf = String::new();
-    let n = std::io::stdin().read_to_string(&mut buf)?;
-    if n == 0 || buf.trim().is_empty() {
-        return Ok(None);
-    }
-    let input: Input = serde_json::from_str(&buf)?;
-    Ok(Some(input))
-}
-
-/// Parse a JSON string. Used by tests and the cache merge path.
-pub fn parse(s: &str) -> Result<Input> {
-    Ok(serde_json::from_str(s)?)
+/// Parse a Claude Code stdin payload. This is the production parse path —
+/// `main` feeds it raw stdin and falls back to `Input::default()` on error,
+/// so it must keep rejecting invalid JSON rather than parsing leniently.
+pub fn parse(s: &str) -> serde_json::Result<Input> {
+    serde_json::from_str(s)
 }
 
 #[cfg(test)]
@@ -150,7 +123,8 @@ mod tests {
                 "context_window_size": 200000,
                 "total_input_tokens": 65000,
                 "total_output_tokens": 6000
-            }
+            },
+            "cost": {"total_cost_usd": 0.5}
         }"#;
         let input = parse(json).unwrap();
         assert_eq!(input.model.name(), "Opus 4.7");
@@ -160,6 +134,7 @@ mod tests {
         assert_eq!(rl.seven_day.unwrap().used_percentage, 35.0);
         let ctx = input.context_window.unwrap();
         assert_eq!(ctx.context_window_size, 200000);
+        assert_eq!(ctx.total_input_tokens, 65000);
     }
 
     #[test]

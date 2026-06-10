@@ -1,12 +1,15 @@
 # claude-quota-bar
 
 Fast Rust statusline for [Claude Code](https://github.com/anthropics/claude-code).
-Battery-style 5-hour / 7-day quota bars, context-window indicator, prompt-cache
-state, and `dir:branch *N` — at ~2.5ms cold start and a ~0.5MB binary.
+Battery-style 5-hour / 7-day quota bars, context-window indicator, and
+`dir:branch *N` — at ~2.5ms cold start and a ~0.5MB binary.
 
 ```
-5h[███42%░░░░]⏰26m | 7d[███35%░░░░]⏰8d3h | Opus 4.7(71.0k/1.0M) | cache 4m12s | proj:main *3
+5h[███42%░░░░]⏰26m | 7d[███35%░░░░]⏰8d3h | Opus 4.7(71.0k/1.0M) | proj:main *3
 ```
+
+Requires Claude Code ≥ 2.1.132 (where `context_window.total_input_tokens`
+reports the current context occupancy rather than a cumulative session total).
 
 ## Why this and not the Python ones
 
@@ -44,14 +47,13 @@ Then wire it into Claude Code (`~/.claude/settings.json`):
 
 ## Segments
 
-Default layout: `5h,7d,model,cache,dir`.
+Default layout: `5h,7d,model,dir`.
 
 | Segment | Source | What it shows |
 |---------|--------|---------------|
 | `5h`    | `rate_limits.five_hour` | Battery bar with `%` inside, plus `⏰` countdown to reset |
 | `7d`    | `rate_limits.seven_day` | Same, weekly window |
 | `model` | `model` + `context_window` | `Opus 4.7(71.0k/1.0M)` — model + ctx tokens used / window |
-| `cache` | transcript scan | Time left on the prompt cache (`4m12s`), or `COLD` once it has expired |
 | `dir`   | `workspace.current_dir` + git | `proj:main *3 ↑1 ↓2` — dir, branch, dirty count, ahead/behind |
 
 When Anthropic hasn't yet shipped `rate_limits` (first few renders of a fresh
@@ -65,8 +67,7 @@ Configured via environment variables:
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `STATUSLINE_LAYOUT` | `5h,7d,model,cache,dir` | Comma-separated segment names (order matters) |
-| `STATUSLINE_CACHE_TTL` | `3600` | Prompt-cache lifetime in seconds. The default assumes the 1-hour extended cache that Claude.ai Pro/Max accounts get automatically; set `300` for the standard 5-minute cache. The active TTL isn't exposed to the statusline, so it can't be auto-detected. |
+| `STATUSLINE_LAYOUT` | `5h,7d,model,dir` | Comma-separated segment names (order matters) |
 | `NO_COLOR` | unset | If set, strips all ANSI — falls back to `█`/`░` glyphs |
 
 Severity thresholds (green / yellow / red) flip at 30% and 70% quota used.
