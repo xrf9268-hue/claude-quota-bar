@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.3.3...v0.4.0) - 2026-06-10
+
+### Added
+
+- [**breaking**] drop cache segment and transcript scan, trust stdin context_window ([#12](https://github.com/xrf9268-hue/claude-quota-bar/pull/12))
+
 ## [0.3.3](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.3.2...v0.3.3) - 2026-06-08
 
 ### Other
