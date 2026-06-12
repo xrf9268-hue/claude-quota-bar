@@ -33,6 +33,13 @@ pub fn countdown(now: u64, resets_at: u64) -> String {
     if secs > MAX_REASONABLE_RESET_SECS {
         return "--".to_string();
     }
+    fmt_elapsed(secs)
+}
+
+/// Format an elapsed duration with the same granularity ladder as
+/// `countdown`, but with no "expired" or sanity-cap states — an elapsed
+/// value is always a fact, never a prediction.
+pub fn fmt_elapsed(secs: u64) -> String {
     if secs >= 86400 {
         let days = secs / 86400;
         let hours = (secs % 86400) / 3600;
@@ -92,6 +99,18 @@ mod tests {
         assert_eq!(countdown(0, 90 * 86400 + 1), "--");
         // At the cap boundary → still rendered.
         assert_eq!(countdown(0, 90 * 86400), "90d");
+    }
+
+    #[test]
+    fn elapsed_levels() {
+        assert_eq!(fmt_elapsed(0), "0s");
+        assert_eq!(fmt_elapsed(45), "45s");
+        assert_eq!(fmt_elapsed(60), "1m");
+        assert_eq!(fmt_elapsed(1560), "26m");
+        assert_eq!(fmt_elapsed(3600), "1h");
+        assert_eq!(fmt_elapsed(3600 + 45 * 60), "1h45m");
+        assert_eq!(fmt_elapsed(86400), "1d");
+        assert_eq!(fmt_elapsed(8 * 86400 + 3 * 3600), "8d3h");
     }
 
     #[test]

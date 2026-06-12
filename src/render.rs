@@ -7,9 +7,9 @@ use crate::git::GitInfo;
 use crate::input::{Input, Window};
 use crate::progress::battery_bar;
 use crate::theme::Theme;
-use crate::time_fmt::{countdown, fmt_tokens};
+use crate::time_fmt::{countdown, fmt_elapsed, fmt_tokens};
 
-pub const DEFAULT_LAYOUT: &[&str] = &["5h", "7d", "model", "dir"];
+pub const DEFAULT_LAYOUT: &[&str] = &["5h", "7d", "model", "session", "dir"];
 pub const BAR_WIDTH: usize = 10;
 pub const BRANCH_MAX_LEN: usize = 25;
 /// Cap on the single-dirty-file path width. Past this, fall back to `*1`
@@ -27,6 +27,9 @@ pub struct Context<'a> {
     pub now_unix: u64,
     pub git_info: Option<&'a GitInfo>,
     pub layout: &'a [String],
+    /// Accumulated active time of this session (idle gaps excluded), from
+    /// `session::update`. `None` = no usable session_id, segment hides.
+    pub session_active_secs: Option<u64>,
 }
 
 pub fn render(ctx: &Context) -> String {
@@ -64,9 +67,17 @@ fn build_segment(name: &str, ctx: &Context) -> Option<String> {
         "5h" => Some(build_window(ctx, "5h", window_5h(ctx.input))),
         "7d" => Some(build_window(ctx, "7d", window_7d(ctx.input))),
         "model" => Some(build_model(ctx)),
+        "session" => build_session(ctx),
         "dir" => build_dir(ctx),
         _ => None,
     }
+}
+
+fn build_session(ctx: &Context) -> Option<String> {
+    let secs = ctx.session_active_secs?;
+    let ink = fg(ctx.theme.ink);
+    let r = reset();
+    Some(format!("{ink}⏱{}{r}", fmt_elapsed(secs)))
 }
 
 fn window_5h(input: &Input) -> Option<&Window> {
@@ -196,6 +207,7 @@ mod tests {
             now_unix: 1_700_000_000,
             git_info: git,
             layout,
+            session_active_secs: None,
         }
     }
 
@@ -452,6 +464,47 @@ mod tests {
                 "unexpected dirty mark in clean state: {out:?}"
             );
         });
+    }
+
+    #[test]
+    fn session_segment_shows_active_time() {
+        no_color(|| {
+            let inp = full_input();
+            let lay = layout(&["session"]);
+            let mut c = ctx(&inp, &lay, None);
+            c.session_active_secs = Some(2 * 3600 + 15 * 60);
+            let out = strip_ansi(&render(&c));
+            assert!(out.contains("2h15m"), "missing active time in {out:?}");
+        });
+    }
+
+    #[test]
+    fn session_segment_hidden_when_unknown() {
+        no_color(|| {
+            // No session_id on stdin (hand-run, invalid payload) → no
+            // ledger → hide the segment rather than show a fake 0s.
+            let inp = full_input();
+            let lay = layout(&["session"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert_eq!(out, "");
+        });
+    }
+
+    #[test]
+    fn session_segment_shows_zero_on_fresh_session() {
+        no_color(|| {
+            let inp = full_input();
+            let lay = layout(&["session"]);
+            let mut c = ctx(&inp, &lay, None);
+            c.session_active_secs = Some(0);
+            let out = strip_ansi(&render(&c));
+            assert!(out.contains("0s"), "fresh session shows 0s: {out:?}");
+        });
+    }
+
+    #[test]
+    fn default_layout_places_session_before_dir() {
+        assert_eq!(DEFAULT_LAYOUT, &["5h", "7d", "model", "session", "dir"]);
     }
 
     #[test]

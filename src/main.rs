@@ -3,7 +3,7 @@
 //! and ignores errors), so every fallible step degrades in place: invalid
 //! stdin parses to defaults and cache I/O errors are ignored.
 
-use claude_quota_bar::{cache, git, input, render, theme, time_fmt};
+use claude_quota_bar::{cache, git, input, render, session, theme, time_fmt};
 use std::io::Read;
 
 fn main() {
@@ -48,6 +48,12 @@ fn main() {
 
     let now_unix = time_fmt::now_unix();
 
+    let session_state = session::update(
+        &data.session_id,
+        now_unix,
+        data.cost.as_ref().map(|c| c.total_api_duration_ms),
+    );
+
     let layout: Vec<String> = match std::env::var("STATUSLINE_LAYOUT") {
         Ok(s) => s.split(',').map(|x| x.trim().to_string()).collect(),
         Err(_) => render::DEFAULT_LAYOUT
@@ -62,6 +68,7 @@ fn main() {
         now_unix,
         git_info: git_info.as_ref(),
         layout: &layout,
+        session_active_secs: session_state.map(|s| s.active_secs),
     };
 
     let line = render::render(&ctx);
@@ -80,7 +87,7 @@ fn print_help() {
          \x20 claude-quota-bar [--version] [--help]\n\
          \n\
          Environment:\n\
-         \x20 STATUSLINE_LAYOUT  Comma-separated segments (default: 5h,7d,model,dir)\n\
+         \x20 STATUSLINE_LAYOUT  Comma-separated segments (default: 5h,7d,model,session,dir)\n\
          \x20 NO_COLOR           Disable ANSI color; fall back to block glyphs",
         ver = env!("CARGO_PKG_VERSION"),
     );

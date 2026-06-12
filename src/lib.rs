@@ -10,5 +10,6 @@ pub mod git;
 pub mod input;
 pub mod progress;
 pub mod render;
+pub mod session;
 pub mod theme;
 pub mod time_fmt;
