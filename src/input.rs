@@ -19,6 +19,20 @@ pub struct Input {
     pub context_window: Option<ContextWindow>,
     #[serde(default)]
     pub rate_limits: Option<RateLimits>,
+    #[serde(default)]
+    pub cost: Option<Cost>,
+}
+
+/// Session cost/usage counters. Only `total_api_duration_ms` is consumed —
+/// it is the "Claude made progress" signal for the session active-time
+/// segment, not a displayed value. `total_duration_ms` is deliberately not
+/// parsed: it is `Date.now() - processStart` inside Claude Code (wall clock,
+/// keeps growing while idle, resets on resume), which is exactly the
+/// semantics the session segment exists to avoid.
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct Cost {
+    #[serde(default)]
+    pub total_api_duration_ms: u64,
 }
 
 #[derive(Debug, Default, Deserialize, Clone)]
@@ -153,6 +167,19 @@ mod tests {
         let fh = input.rate_limits.unwrap().five_hour.unwrap();
         assert_eq!(fh.used_percentage, 42.0);
         assert!(fh.resets_at.is_none());
+    }
+
+    #[test]
+    fn parse_cost_api_duration() {
+        let json = r#"{"cost": {"total_cost_usd": 0.5, "total_api_duration_ms": 45000}}"#;
+        let input = parse(json).unwrap();
+        assert_eq!(input.cost.unwrap().total_api_duration_ms, 45000);
+    }
+
+    #[test]
+    fn parse_missing_cost_is_none() {
+        let input = parse("{}").unwrap();
+        assert!(input.cost.is_none());
     }
 
     #[test]

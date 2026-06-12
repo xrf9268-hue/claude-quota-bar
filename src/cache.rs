@@ -124,20 +124,7 @@ fn rollover(window: Option<Window>, now_unix: u64) -> Option<Window> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-    use tempfile::TempDir;
-
-    // Cache tests mutate the HOME env var. Serialize them so they don't
-    // stomp on each other's tempdirs.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn with_temp_home<F: FnOnce(&TempDir)>(f: F) {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = TempDir::new().unwrap();
-        unsafe { std::env::set_var("HOME", home.path()) };
-        f(&home);
-        unsafe { std::env::remove_var("HOME") };
-    }
+    use crate::test_env::with_temp_home;
 
     #[test]
     fn rollover_future_keeps_value() {

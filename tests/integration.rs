@@ -16,6 +16,11 @@ fn fixture(name: &str) -> String {
 
 fn run(stdin: &str, layout: Option<&str>) -> (String, TempDir) {
     let home = TempDir::new().expect("tempdir");
+    let stdout = run_in_home(stdin, layout, &home);
+    (stdout, home)
+}
+
+fn run_in_home(stdin: &str, layout: Option<&str>, home: &TempDir) -> String {
     let mut cmd = Command::cargo_bin("claude-quota-bar").unwrap();
     cmd.env("NO_COLOR", "1")
         .env("HOME", home.path())
@@ -24,8 +29,7 @@ fn run(stdin: &str, layout: Option<&str>) -> (String, TempDir) {
         cmd.env("STATUSLINE_LAYOUT", l);
     }
     let out = cmd.write_stdin(stdin).assert().success();
-    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
-    (stdout, home)
+    String::from_utf8_lossy(&out.get_output().stdout).into_owned()
 }
 
 #[test]
@@ -55,6 +59,46 @@ fn empty_stdin_does_not_crash() {
 #[test]
 fn invalid_json_does_not_crash() {
     run("not json", None);
+}
+
+#[test]
+fn session_segment_advances_persisted_active_time() {
+    let home = TempDir::new().expect("tempdir");
+    let dir = home.path().join(".cache/claude-quota-bar/sessions");
+    fs::create_dir_all(&dir).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // 2h15m accrued, last heartbeat 10s ago, api counter differs from the
+    // fixture's (fixture cost has no total_api_duration_ms → parses as 0)
+    // so the 10s gap counts as progress.
+    fs::write(
+        dir.join("test-session.json"),
+        format!(
+            r#"{{"active_secs":8100,"last_seen_unix":{},"last_api_ms":1}}"#,
+            now - 10
+        ),
+    )
+    .unwrap();
+
+    let stdout = run_in_home(&fixture("full_session.json"), Some("session"), &home);
+    assert!(
+        stdout.contains("2h15m"),
+        "missing active time in {stdout:?}"
+    );
+}
+
+#[test]
+fn session_segment_hidden_without_session_id() {
+    let (stdout, _h) = run(&fixture("no_rate_limits.json"), Some("session"));
+    assert_eq!(stdout.trim(), "", "segment must hide: {stdout:?}");
+}
+
+#[test]
+fn fresh_session_shows_zero_active_time() {
+    let (stdout, _h) = run(&fixture("full_session.json"), None);
+    assert!(stdout.contains("⏱0s"), "missing ⏱0s in {stdout:?}");
 }
 
 #[test]
