@@ -55,7 +55,10 @@ pub fn advance(prev: Option<State>, now_unix: u64, api_ms: Option<u64>) -> State
         0
     };
     State {
-        active_secs: prev.active_secs + credit,
+        // Saturating: the ledger lives in the user's HOME and can be
+        // hand-edited to u64::MAX; debug builds panic on overflow and the
+        // statusline must never crash the parent.
+        active_secs: prev.active_secs.saturating_add(credit),
         last_seen_unix: now_unix,
         last_api_ms: api_ms.unwrap_or(prev.last_api_ms),
     }
@@ -79,10 +82,12 @@ pub fn update(session_id: &str, now_unix: u64, api_ms: Option<u64>) -> Option<St
     let prev = std::fs::read_to_string(&path)
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok());
-    if prev.is_none() {
+    if !path.exists() {
         // New session on this machine: a natural, once-per-session moment
         // to sweep dead ledgers instead of paying a directory scan on
-        // every render.
+        // every render. Keyed on file existence, not parse success — a
+        // corrupt ledger restarts its count but must not pay (or inflict)
+        // a sweep on every render until persist repairs it.
         cleanup(&dir);
     }
     let next = advance(prev, now_unix, api_ms);
@@ -102,7 +107,11 @@ fn persist(path: &std::path::Path, state: &State) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let raw = serde_json::to_string(state).map_err(std::io::Error::other)?;
-    let tmp = path.with_extension("json.tmp");
+    // PID-unique tmp name: concurrent renders of the same session would
+    // otherwise interleave write/rename on a shared tmp file and silently
+    // drop one heartbeat. Orphaned tmps (killed process) age out via
+    // cleanup, which sweeps by mtime regardless of extension.
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     std::fs::write(&tmp, raw)?;
     std::fs::rename(tmp, path)?;
     Ok(())
@@ -128,20 +137,7 @@ fn cleanup(dir: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-    use tempfile::TempDir;
-
-    // I/O tests mutate the HOME env var. Serialize them so they don't
-    // stomp on each other's tempdirs (same pattern as cache.rs).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn with_temp_home<F: FnOnce(&TempDir)>(f: F) {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = TempDir::new().unwrap();
-        unsafe { std::env::set_var("HOME", home.path()) };
-        f(&home);
-        unsafe { std::env::remove_var("HOME") };
-    }
+    use crate::test_env::with_temp_home;
 
     fn state(active_secs: u64, last_seen_unix: u64, last_api_ms: u64) -> State {
         State {
@@ -218,6 +214,15 @@ mod tests {
         assert_eq!(s.last_seen_unix, 900);
     }
 
+    #[test]
+    fn absurd_persisted_active_secs_does_not_panic() {
+        // The ledger lives in the user's HOME and can be hand-edited to
+        // u64::MAX. Debug builds panic on overflow — and the statusline
+        // must never crash the parent.
+        let s = advance(Some(state(u64::MAX, 1000, 1)), 1060, Some(2));
+        assert_eq!(s.active_secs, u64::MAX);
+    }
+
     // --- update: load → advance → save round trip ---
 
     #[test]
@@ -288,6 +293,33 @@ mod tests {
             update("new-sess", 2000, Some(100));
             assert!(!old.exists(), "8-day-old session file must be removed");
             assert!(dir.join("new-sess.json").exists());
+        });
+    }
+
+    #[test]
+    fn corrupt_state_file_does_not_trigger_cleanup() {
+        // Cleanup is "once per new session", keyed on the file not existing.
+        // A corrupt-but-present ledger must not pay the directory scan (and
+        // must not sweep other sessions' files as a side effect).
+        with_temp_home(|home| {
+            update("sess-1", 1000, Some(100));
+            update("other-sess", 1500, Some(100));
+            let dir = home.path().join(".cache/claude-quota-bar/sessions");
+            let other = dir.join("other-sess.json");
+            let ancient = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86400);
+            std::fs::File::options()
+                .write(true)
+                .open(&other)
+                .unwrap()
+                .set_modified(ancient)
+                .unwrap();
+
+            std::fs::write(dir.join("sess-1.json"), "not json").unwrap();
+            update("sess-1", 2060, Some(200));
+            assert!(
+                other.exists(),
+                "corrupt existing ledger must not trigger a sweep"
+            );
         });
     }
 

@@ -13,3 +13,24 @@ pub mod render;
 pub mod session;
 pub mod theme;
 pub mod time_fmt;
+
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    // HOME is process-global state: every test that swaps it must
+    // serialize through this ONE lock, no matter which module it lives
+    // in. Two modules each holding their own lock (as cache.rs and
+    // session.rs briefly did) still race each other under the parallel
+    // test runner and fail intermittently.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    pub fn with_temp_home<F: FnOnce(&TempDir)>(f: F) {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().unwrap();
+        unsafe { std::env::set_var("HOME", home.path()) };
+        f(&home);
+        unsafe { std::env::remove_var("HOME") };
+    }
+}
