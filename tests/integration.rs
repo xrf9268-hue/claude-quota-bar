@@ -98,7 +98,7 @@ fn session_segment_hidden_without_session_id() {
 #[test]
 fn fresh_session_shows_zero_active_time() {
     let (stdout, _h) = run(&fixture("full_session.json"), None);
-    assert!(stdout.contains("⏱0s"), "missing ⏱0s in {stdout:?}");
+    assert!(stdout.contains("⏳0s"), "missing ⏳0s in {stdout:?}");
 }
 
 #[test]

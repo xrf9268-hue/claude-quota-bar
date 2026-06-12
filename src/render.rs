@@ -77,7 +77,10 @@ fn build_session(ctx: &Context) -> Option<String> {
     let secs = ctx.session_active_secs?;
     let ink = fg(ctx.theme.ink);
     let r = reset();
-    Some(format!("{ink}⏱{}{r}", fmt_elapsed(secs)))
+    // ⏳ not ⏱: any glyph here must be East-Asian-Width Wide (like ⏰).
+    // ⏱ is EAW Narrow, so terminals advance one cell while the font draws
+    // a two-cell emoji — the glyph overlaps the first digit.
+    Some(format!("{ink}⏳{}{r}", fmt_elapsed(secs)))
 }
 
 fn window_5h(input: &Input) -> Option<&Window> {
@@ -474,7 +477,11 @@ mod tests {
             let mut c = ctx(&inp, &lay, None);
             c.session_active_secs = Some(2 * 3600 + 15 * 60);
             let out = strip_ansi(&render(&c));
-            assert!(out.contains("2h15m"), "missing active time in {out:?}");
+            // The glyph must be East-Asian-Width Wide (⏳, like the ⏰
+            // already in use). A Narrow emoji such as ⏱ (EAW=N) gets a
+            // double-width font glyph but single-cell terminal advance,
+            // overlapping the digits that follow.
+            assert!(out.contains("⏳2h15m"), "missing active time in {out:?}");
         });
     }
 

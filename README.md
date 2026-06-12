@@ -5,7 +5,7 @@ Battery-style 5-hour / 7-day quota bars, context-window indicator, session
 active time, and `dir:branch *N` — at ~2.5ms cold start and a ~0.5MB binary.
 
 ```
-5h[███42%░░░░]⏰26m | 7d[███35%░░░░]⏰8d3h | Opus 4.7(71.0k/1.0M) | ⏱2h15m | proj:main *3
+5h[███42%░░░░]⏰26m | 7d[███35%░░░░]⏰8d3h | Opus 4.7(71.0k/1.0M) | ⏳2h15m | proj:main *3
 ```
 
 Requires Claude Code ≥ 2.1.132 (where `context_window.total_input_tokens`
@@ -54,7 +54,7 @@ Default layout: `5h,7d,model,session,dir`.
 | `5h`    | `rate_limits.five_hour` | Battery bar with `%` inside, plus `⏰` countdown to reset |
 | `7d`    | `rate_limits.seven_day` | Same, weekly window |
 | `model` | `model` + `context_window` | `Opus 4.7(71.0k/1.0M)` — model + ctx tokens used / window |
-| `session` | own ledger per `session_id` | `⏱2h15m` — active time this session, idle gaps excluded |
+| `session` | own ledger per `session_id` | `⏳2h15m` — active time this session, idle gaps excluded |
 | `dir`   | `workspace.current_dir` + git | `proj:main *3 ↑1 ↓2` — dir, branch, dirty count, ahead/behind |
 
 ### How `session` counts time
