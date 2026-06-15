@@ -8,7 +8,7 @@
 Rust statusline binary for [Claude Code](https://github.com/anthropics/claude-code).
 Reads a JSON payload on stdin once per render, prints a colored line on stdout,
 exits. Single-purpose: surface 5h/7d rate-limit quota, context-window usage,
-session active time, and `dir:branch *N`.
+session elapsed time, and `dir:branch *N`.
 
 We target the latest Claude Code only (≥ 2.1.132, where stdin's
 `context_window.total_input_tokens` means current context occupancy). No
@@ -105,18 +105,20 @@ These are the load-bearing decisions that aren't obvious from reading code:
    total leaking through an old Claude Code: render `--`, never a
    confident wrong number.
 
-7. **The `session` segment never trusts Claude Code's stdin durations.**
-   `cost.total_duration_ms` is `Date.now() - processStart` inside Claude Code
-   (verified against the 2.1.175 binary): it grows while idle and resets to
-   zero on `--resume`, and `total_api_duration_ms` only counts API wait and
-   also resets on resume. The segment instead accrues render-to-render gaps
-   into `~/.cache/claude-quota-bar/sessions/<session_id>.json` (session_id
-   is stable across resume). Two accrual guards in `session::advance`:
-   gap ≤ 15 min (longer = interruption), and `api_ms` *changed* since the
-   last render — `!=` not `>`, because resume restarts the in-process
-   counter — so `statusLine.refreshInterval` idle re-renders don't accrue.
-   The session_id becomes a filename: reject anything beyond the UUID
-   alphabet, stdin is outside the trust boundary.
+7. **The `session` segment renders `cost.total_duration_ms` directly.**
+   It is `Date.now() - processStart` inside Claude Code (verified against the
+   2.1.175 binary): wall-clock since the session started, growing while idle
+   and resetting to zero on `--resume`. We render it as-is (ms → s) and hide
+   the segment when stdin ships no `cost` object yet (very first renders).
+   This replaced a per-session ledger that integrated render-to-render gaps:
+   the statusline render is sparse and event-driven (Claude Code's docs note
+   the triggers "go quiet when the main session is idle", and they stay quiet
+   through long autonomous turns), so that integral *under-counted real
+   sessions by 40–90%* — measured against transcript wall-clock. A stateless
+   wall-clock readout has zero measurement error; the trade-off, accepted
+   deliberately, is that it includes idle time. With no `refreshInterval` set
+   the value is effectively sampled at each turn's stop, so it reads as
+   "elapsed up to the last stop" rather than free-running.
 
 8. **A layout with no recognized segment falls back to `DEFAULT_LAYOUT`**
    (`render::render`). A stale `STATUSLINE_LAYOUT=cache` from before that
@@ -175,7 +177,6 @@ src/
 ├── time_fmt.rs    # countdown formatting, token compaction (1.2k / 1.5M)
 ├── render.rs      # pure composition; takes Context, returns String
 ├── git.rs         # shells out to git with 1s timeout + 5s cache
-├── session.rs     # per-session active-time ledger (idle gaps excluded)
 └── cache.rs       # ~/.cache/claude-quota-bar/last_stdin.json hydration
 tests/
 └── integration.rs # assert_cmd snapshot tests of the full binary

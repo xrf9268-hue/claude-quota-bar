@@ -27,9 +27,10 @@ pub struct Context<'a> {
     pub now_unix: u64,
     pub git_info: Option<&'a GitInfo>,
     pub layout: &'a [String],
-    /// Accumulated active time of this session (idle gaps excluded), from
-    /// `session::update`. `None` = no usable session_id, segment hides.
-    pub session_active_secs: Option<u64>,
+    /// Wall-clock seconds since this session started, straight from Claude
+    /// Code's `cost.total_duration_ms`. `None` = stdin shipped no `cost`
+    /// object yet (very first renders), and the segment hides.
+    pub session_elapsed_secs: Option<u64>,
 }
 
 pub fn render(ctx: &Context) -> String {
@@ -74,7 +75,7 @@ fn build_segment(name: &str, ctx: &Context) -> Option<String> {
 }
 
 fn build_session(ctx: &Context) -> Option<String> {
-    let secs = ctx.session_active_secs?;
+    let secs = ctx.session_elapsed_secs?;
     let ink = fg(ctx.theme.ink);
     let r = reset();
     // ⏳ not ⏱: any glyph here must be East-Asian-Width Wide (like ⏰).
@@ -210,7 +211,7 @@ mod tests {
             now_unix: 1_700_000_000,
             git_info: git,
             layout,
-            session_active_secs: None,
+            session_elapsed_secs: None,
         }
     }
 
@@ -470,26 +471,26 @@ mod tests {
     }
 
     #[test]
-    fn session_segment_shows_active_time() {
+    fn session_segment_shows_elapsed_time() {
         no_color(|| {
             let inp = full_input();
             let lay = layout(&["session"]);
             let mut c = ctx(&inp, &lay, None);
-            c.session_active_secs = Some(2 * 3600 + 15 * 60);
+            c.session_elapsed_secs = Some(2 * 3600 + 15 * 60);
             let out = strip_ansi(&render(&c));
             // The glyph must be East-Asian-Width Wide (⏳, like the ⏰
             // already in use). A Narrow emoji such as ⏱ (EAW=N) gets a
             // double-width font glyph but single-cell terminal advance,
             // overlapping the digits that follow.
-            assert!(out.contains("⏳2h15m"), "missing active time in {out:?}");
+            assert!(out.contains("⏳2h15m"), "missing elapsed time in {out:?}");
         });
     }
 
     #[test]
     fn session_segment_hidden_when_unknown() {
         no_color(|| {
-            // No session_id on stdin (hand-run, invalid payload) → no
-            // ledger → hide the segment rather than show a fake 0s.
+            // stdin shipped no `cost` object (very first renders) → no
+            // duration → hide the segment rather than show a fake 0s.
             let inp = full_input();
             let lay = layout(&["session"]);
             let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
@@ -503,7 +504,7 @@ mod tests {
             let inp = full_input();
             let lay = layout(&["session"]);
             let mut c = ctx(&inp, &lay, None);
-            c.session_active_secs = Some(0);
+            c.session_elapsed_secs = Some(0);
             let out = strip_ansi(&render(&c));
             assert!(out.contains("0s"), "fresh session shows 0s: {out:?}");
         });

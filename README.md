@@ -2,7 +2,7 @@
 
 Fast Rust statusline for [Claude Code](https://github.com/anthropics/claude-code).
 Battery-style 5-hour / 7-day quota bars, context-window indicator, session
-active time, and `dir:branch *N` — at ~2.5ms cold start and a ~0.5MB binary.
+elapsed time, and `dir:branch *N` — at ~2.5ms cold start and a ~0.5MB binary.
 
 ```
 5h[███42%░░░░]⏰26m | 7d[███35%░░░░]⏰8d3h | Opus 4.7(71.0k/1.0M) | ⏳2h15m | proj:main *3
@@ -54,26 +54,27 @@ Default layout: `5h,7d,model,session,dir`.
 | `5h`    | `rate_limits.five_hour` | Battery bar with `%` inside, plus `⏰` countdown to reset |
 | `7d`    | `rate_limits.seven_day` | Same, weekly window |
 | `model` | `model` + `context_window` | `Opus 4.7(71.0k/1.0M)` — model + ctx tokens used / window |
-| `session` | own ledger per `session_id` | `⏳2h15m` — active time this session, idle gaps excluded |
+| `session` | `cost.total_duration_ms` | `⏳2h15m` — wall-clock time this session |
 | `dir`   | `workspace.current_dir` + git | `proj:main *3 ↑1 ↓2` — dir, branch, dirty count, ahead/behind |
 
 ### How `session` counts time
 
-Claude Code's own `cost.total_duration_ms` is wall-clock since process start:
-it keeps growing while you're at lunch and resets to zero on `--resume`.
-Instead, this bar keeps its own per-session ledger
-(`~/.cache/claude-quota-bar/sessions/<session_id>.json`), treating each
-statusline render as a heartbeat:
+It shows Claude Code's own `cost.total_duration_ms` — wall-clock since the
+session started — formatted directly. A few consequences worth knowing:
 
-- Gaps **≤ 15 minutes** between renders count as active time (think-time,
-  long builds). Longer gaps are interruptions and are dropped.
-- A render only accrues when the payload shows progress
-  (`total_api_duration_ms` changed), so `statusLine.refreshInterval` users
-  don't accumulate idle wall-clock.
-- `--resume` / `--continue` keep their session_id, so the counter picks up
-  where it left off. `--fork-session` / `/branch` get a fresh counter.
+- It **includes idle time** (it keeps ticking while you're reading a reply or
+  at lunch). Without `statusLine.refreshInterval` set, the statusline only
+  re-renders at each turn's completion, so the value you see is effectively
+  sampled at the last stop and stays put until the next turn.
+- It **resets to zero on `--resume` / `--continue`** — a resumed session is a
+  new process, so the counter starts over.
 
-Ledgers untouched for 7 days are swept automatically.
+> An earlier version kept its own per-session ledger that tried to subtract
+> idle gaps. But the statusline render is sparse and event-driven (Claude
+> Code's triggers "go quiet when the session is idle", and stay quiet through
+> long autonomous turns), so integrating wall-clock between renders
+> *under-counted real sessions by 40–90%*. A direct wall-clock readout has no
+> measurement error; the trade-off is that it counts idle time.
 
 When Anthropic hasn't yet shipped `rate_limits` (first few renders of a fresh
 session), the bar displays `--%`. A cross-session cache at
