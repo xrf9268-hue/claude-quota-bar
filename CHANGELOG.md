@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.5.1...v0.6.0) - 2026-06-15
+
+### Fixed
+
+- render session segment as wall-clock, drop sparse-render ledger ([#18](https://github.com/xrf9268-hue/claude-quota-bar/pull/18))
+
 ## [0.5.1](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.5.0...v0.5.1) - 2026-06-12
 
 ### Fixed
