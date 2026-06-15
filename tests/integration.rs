@@ -62,43 +62,22 @@ fn invalid_json_does_not_crash() {
 }
 
 #[test]
-fn session_segment_advances_persisted_active_time() {
-    let home = TempDir::new().expect("tempdir");
-    let dir = home.path().join(".cache/claude-quota-bar/sessions");
-    fs::create_dir_all(&dir).unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    // 2h15m accrued, last heartbeat 10s ago, api counter differs from the
-    // fixture's (fixture cost has no total_api_duration_ms → parses as 0)
-    // so the 10s gap counts as progress.
-    fs::write(
-        dir.join("test-session.json"),
-        format!(
-            r#"{{"active_secs":8100,"last_seen_unix":{},"last_api_ms":1}}"#,
-            now - 10
-        ),
-    )
-    .unwrap();
-
-    let stdout = run_in_home(&fixture("full_session.json"), Some("session"), &home);
+fn session_segment_shows_total_duration() {
+    // full_session.json carries cost.total_duration_ms = 145000 (145s).
+    // The segment renders Claude Code's own wall-clock counter directly.
+    let (stdout, _h) = run(&fixture("full_session.json"), Some("session"));
     assert!(
-        stdout.contains("2h15m"),
-        "missing active time in {stdout:?}"
+        stdout.contains("⏳2m"),
+        "missing elapsed time in {stdout:?}"
     );
 }
 
 #[test]
-fn session_segment_hidden_without_session_id() {
+fn session_segment_hidden_without_cost() {
+    // no_rate_limits.json ships no `cost` object → no duration → segment
+    // hides rather than showing a fake 0s.
     let (stdout, _h) = run(&fixture("no_rate_limits.json"), Some("session"));
     assert_eq!(stdout.trim(), "", "segment must hide: {stdout:?}");
-}
-
-#[test]
-fn fresh_session_shows_zero_active_time() {
-    let (stdout, _h) = run(&fixture("full_session.json"), None);
-    assert!(stdout.contains("⏳0s"), "missing ⏳0s in {stdout:?}");
 }
 
 #[test]

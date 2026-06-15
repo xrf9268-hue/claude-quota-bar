@@ -3,7 +3,7 @@
 //! and ignores errors), so every fallible step degrades in place: invalid
 //! stdin parses to defaults and cache I/O errors are ignored.
 
-use claude_quota_bar::{cache, git, input, render, session, theme, time_fmt};
+use claude_quota_bar::{cache, git, input, render, theme, time_fmt};
 use std::io::Read;
 
 fn main() {
@@ -48,11 +48,11 @@ fn main() {
 
     let now_unix = time_fmt::now_unix();
 
-    let session_state = session::update(
-        &data.session_id,
-        now_unix,
-        data.cost.as_ref().map(|c| c.total_api_duration_ms),
-    );
+    // Session elapsed time is Claude Code's own wall-clock counter
+    // (`cost.total_duration_ms`), converted to seconds. No local ledger: the
+    // statusline is a stateless render. `None` when stdin shipped no `cost`
+    // object yet, so the segment hides instead of showing a fake 0s.
+    let session_elapsed_secs = data.cost.as_ref().map(|c| c.total_duration_ms / 1000);
 
     let layout: Vec<String> = match std::env::var("STATUSLINE_LAYOUT") {
         Ok(s) => s.split(',').map(|x| x.trim().to_string()).collect(),
@@ -68,7 +68,7 @@ fn main() {
         now_unix,
         git_info: git_info.as_ref(),
         layout: &layout,
-        session_active_secs: session_state.map(|s| s.active_secs),
+        session_elapsed_secs,
     };
 
     let line = render::render(&ctx);

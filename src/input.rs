@@ -23,16 +23,21 @@ pub struct Input {
     pub cost: Option<Cost>,
 }
 
-/// Session cost/usage counters. Only `total_api_duration_ms` is consumed —
-/// it is the "Claude made progress" signal for the session active-time
-/// segment, not a displayed value. `total_duration_ms` is deliberately not
-/// parsed: it is `Date.now() - processStart` inside Claude Code (wall clock,
-/// keeps growing while idle, resets on resume), which is exactly the
-/// semantics the session segment exists to avoid.
+/// Session cost/usage counters. Only `total_duration_ms` is consumed — it is
+/// Claude Code's wall-clock time since the session started (`Date.now() -
+/// processStart`), rendered directly by the `session` segment. It grows while
+/// idle and resets to zero on `--resume`/`--continue` (a resumed session is a
+/// new process); both are acceptable for a "session elapsed" readout.
+///
+/// We deliberately no longer keep our own active-time ledger. The previous
+/// approach integrated wall-clock between statusline renders, but renders are
+/// sparse and event-driven — Claude Code's docs note the triggers "go quiet
+/// when the main session is idle" (e.g. during long autonomous turns) — so
+/// that integral systematically under-counted by 40-90% in real sessions.
 #[derive(Debug, Default, Deserialize, Clone)]
 pub struct Cost {
     #[serde(default)]
-    pub total_api_duration_ms: u64,
+    pub total_duration_ms: u64,
 }
 
 #[derive(Debug, Default, Deserialize, Clone)]
@@ -170,10 +175,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_cost_api_duration() {
-        let json = r#"{"cost": {"total_cost_usd": 0.5, "total_api_duration_ms": 45000}}"#;
+    fn parse_cost_duration() {
+        let json = r#"{"cost": {"total_cost_usd": 0.5, "total_duration_ms": 145000}}"#;
         let input = parse(json).unwrap();
-        assert_eq!(input.cost.unwrap().total_api_duration_ms, 45000);
+        assert_eq!(input.cost.unwrap().total_duration_ms, 145000);
     }
 
     #[test]
