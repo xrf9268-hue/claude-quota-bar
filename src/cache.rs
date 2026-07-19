@@ -44,7 +44,7 @@ pub fn maybe_save(input: &Input, raw: &str) -> std::io::Result<()> {
     let has_data = input
         .rate_limits
         .as_ref()
-        .map(|r| r.five_hour.is_some() || r.seven_day.is_some())
+        .map(|r| r.five_hour.is_some() || r.seven_day.is_some() || !r.model_scoped.is_empty())
         .unwrap_or(false);
     if !has_data || input.session_id.is_empty() {
         return Ok(());
@@ -65,7 +65,7 @@ pub fn fill_from_cache(input: &mut Input) {
     let needs_fill = input
         .rate_limits
         .as_ref()
-        .map(|r| r.five_hour.is_none() && r.seven_day.is_none())
+        .map(|r| r.five_hour.is_none() && r.seven_day.is_none() && r.model_scoped.is_empty())
         .unwrap_or(true);
     if !needs_fill {
         return;
@@ -100,8 +100,19 @@ pub fn fill_from_cache(input: &mut Input) {
     if let Some(rl) = cached.rate_limits {
         limits.five_hour = rollover(rl.five_hour, now_unix);
         limits.seven_day = rollover(rl.seven_day, now_unix);
+        // Same rollover rule for per-model buckets: an expired resets_at
+        // means the window rolled and the cached pct is meaningless — drop
+        // the entry (the segment hides) rather than show a stale value.
+        limits.model_scoped = rl
+            .model_scoped
+            .into_iter()
+            .filter(|w| match w.resets_at {
+                Some(resets) => resets > now_unix,
+                None => true,
+            })
+            .collect();
     }
-    if limits.five_hour.is_some() || limits.seven_day.is_some() {
+    if limits.five_hour.is_some() || limits.seven_day.is_some() || !limits.model_scoped.is_empty() {
         input.rate_limits = Some(limits);
     }
     // Deliberately do NOT hydrate context_window: the cache is global
@@ -201,6 +212,42 @@ mod tests {
                 fresh.context_window.is_none(),
                 "context_window must not be hydrated across sessions"
             );
+        });
+    }
+
+    #[test]
+    fn fill_from_cache_hydrates_model_scoped() {
+        with_temp_home(|_| {
+            let payload = format!(
+                r#"{{"session_id":"s","rate_limits":{{"five_hour":{{"used_percentage":42,"resets_at":{fresh}}},"model_scoped":[{{"display_name":"Fable","used_percentage":18,"resets_at":{fresh}}},{{"display_name":"Opus","used_percentage":50,"resets_at":100}}]}}}}"#,
+                fresh = now() + 600
+            );
+            let cached: Input = serde_json::from_str(&payload).unwrap();
+            maybe_save(&cached, &payload).unwrap();
+
+            let mut fresh: Input = serde_json::from_str("{}").unwrap();
+            fill_from_cache(&mut fresh);
+
+            let rl = fresh.rate_limits.unwrap();
+            // The fresh Fable bucket survives; the rolled-over Opus bucket
+            // (resets_at deep in the past) is dropped.
+            assert_eq!(rl.model_scoped.len(), 1);
+            let f = rl.fable().unwrap();
+            assert_eq!(f.used_percentage, Some(18.0));
+        });
+    }
+
+    #[test]
+    fn maybe_save_accepts_model_scoped_only_payload() {
+        with_temp_home(|home| {
+            let payload = format!(
+                r#"{{"session_id":"s","rate_limits":{{"model_scoped":[{{"display_name":"Fable","used_percentage":18,"resets_at":{}}}]}}}}"#,
+                now() + 600
+            );
+            let input: Input = serde_json::from_str(&payload).unwrap();
+            maybe_save(&input, &payload).unwrap();
+            let path = home.path().join(".cache/claude-quota-bar/last_stdin.json");
+            assert!(path.exists(), "model_scoped-only payload must be cached");
         });
     }
 

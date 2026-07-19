@@ -87,7 +87,7 @@ fn print_help() {
          \x20 claude-quota-bar [--version] [--help]\n\
          \n\
          Environment:\n\
-         \x20 STATUSLINE_LAYOUT  Comma-separated segments (default: 5h,7d,model,session,dir)\n\
+         \x20 STATUSLINE_LAYOUT  Comma-separated segments (default: 5h,7d,fable,model,session,dir)\n\
          \x20 NO_COLOR           Disable ANSI color; fall back to block glyphs",
         ver = env!("CARGO_PKG_VERSION"),
     );

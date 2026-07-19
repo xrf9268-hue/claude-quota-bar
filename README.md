@@ -47,12 +47,13 @@ Then wire it into Claude Code (`~/.claude/settings.json`):
 
 ## Segments
 
-Default layout: `5h,7d,model,session,dir`.
+Default layout: `5h,7d,fable,model,session,dir`.
 
 | Segment | Source | What it shows |
 |---------|--------|---------------|
 | `5h`    | `rate_limits.five_hour` | Battery bar with `%` inside, plus `⏰` countdown to reset |
 | `7d`    | `rate_limits.seven_day` | Same, weekly window |
+| `fable` | `rate_limits.model_scoped` | Same, for the per-model Fable allowance (Max/Team Premium: Fable at 50% of limits). Hidden until the server ships a Fable bucket |
 | `model` | `model` + `context_window` | `Opus 4.7(71.0k/1.0M)` — model + ctx tokens used / window |
 | `session` | `cost.total_duration_ms` | `⏳2h15m` — wall-clock time this session |
 | `dir`   | `workspace.current_dir` + git | `proj:main *3 ↑1 ↓2` — dir, branch, dirty count, ahead/behind |
@@ -87,7 +88,7 @@ Configured via environment variables:
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `STATUSLINE_LAYOUT` | `5h,7d,model,session,dir` | Comma-separated segment names (order matters) |
+| `STATUSLINE_LAYOUT` | `5h,7d,fable,model,session,dir` | Comma-separated segment names (order matters) |
 | `NO_COLOR` | unset | If set, strips all ANSI — falls back to `█`/`░` glyphs |
 
 Severity thresholds (green / yellow / red) flip at 30% and 70% quota used.

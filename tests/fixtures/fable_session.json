@@ -1,0 +1,21 @@
+{
+  "session_id": "test-session",
+  "model": {"id": "claude-fable-5", "display_name": "Fable 5"},
+  "workspace": {"current_dir": "/Users/x/proj"},
+  "cost": {
+    "total_cost_usd": 0.523,
+    "total_duration_ms": 145000
+  },
+  "context_window": {
+    "context_window_size": 1000000,
+    "total_input_tokens": 65000
+  },
+  "rate_limits": {
+    "five_hour": {"used_percentage": 42, "resets_at": 32503680000},
+    "seven_day": {"used_percentage": 35, "resets_at": 32503680000},
+    "model_scoped": [
+      {"display_name": "Fable", "utilization": 0.18, "resets_at": "2999-01-01T00:00:00.000Z"}
+    ]
+  },
+  "version": "2.1.215"
+}

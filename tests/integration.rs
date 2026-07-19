@@ -81,6 +81,28 @@ fn session_segment_hidden_without_cost() {
 }
 
 #[test]
+fn fable_bucket_renders_in_default_layout() {
+    // fable_session.json carries rate_limits.model_scoped with a Fable
+    // bucket (utilization 0.18, ISO resets_at) — the internal-snapshot wire
+    // shape. The segment is part of the default layout.
+    let (stdout, _h) = run(&fixture("fable_session.json"), None);
+    assert!(
+        stdout.contains("Fable["),
+        "missing Fable segment in {stdout:?}"
+    );
+    assert!(stdout.contains("18%"), "missing Fable pct in {stdout:?}");
+    assert!(stdout.contains("42%"), "5h must still render in {stdout:?}");
+}
+
+#[test]
+fn fable_segment_hidden_without_bucket() {
+    // full_session.json has rate_limits but no model_scoped — the segment
+    // must hide instead of rendering a dead "Fable[--%]".
+    let (stdout, _h) = run(&fixture("full_session.json"), Some("fable"));
+    assert_eq!(stdout.trim(), "", "segment must hide: {stdout:?}");
+}
+
+#[test]
 fn layout_env_var_controls_segments() {
     let (stdout, _h) = run(&fixture("full_session.json"), Some("model"));
     assert!(stdout.contains("Opus 4.7"));
