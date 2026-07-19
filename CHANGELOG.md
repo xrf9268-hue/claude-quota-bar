@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.6.0...v0.7.0) - 2026-07-19
+
+### Added
+
+- add fable quota segment ([#22](https://github.com/xrf9268-hue/claude-quota-bar/pull/22))
+
+### Other
+
+- bump the actions group with 2 updates ([#21](https://github.com/xrf9268-hue/claude-quota-bar/pull/21))
+- bump insta from 1.47.2 to 1.48.0 in the cargo group ([#20](https://github.com/xrf9268-hue/claude-quota-bar/pull/20))
+
 ## [0.6.0](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.5.1...v0.6.0) - 2026-06-15
 
 ### Fixed
