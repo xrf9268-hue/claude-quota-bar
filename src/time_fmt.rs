@@ -63,6 +63,54 @@ pub fn fmt_elapsed(secs: u64) -> String {
     }
 }
 
+/// Parse a UTC ISO-8601 timestamp (`2026-07-20T07:00:00.000Z`) to unix epoch
+/// seconds. Claude Code's `model_scoped` windows carry `resets_at` as a
+/// `Date.toISOString()` string rather than the epoch number the other
+/// windows use. Only `Z` / `+00:00` offsets are accepted — a non-UTC offset
+/// means we can't trust the value, and "unknown" beats a shifted countdown.
+pub fn parse_iso8601_utc(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let rest = s.strip_suffix('Z').or_else(|| s.strip_suffix("+00:00"))?;
+    let (date, time) = rest.split_once('T')?;
+
+    let mut dp = date.split('-');
+    let y: i64 = dp.next()?.parse().ok()?;
+    let m: u32 = dp.next()?.parse().ok()?;
+    let d: u32 = dp.next()?.parse().ok()?;
+    if dp.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+
+    // Fractional seconds are truncated: a countdown never needs sub-second
+    // precision.
+    let time = time.split('.').next()?;
+    let mut tp = time.split(':');
+    let hh: u64 = tp.next()?.parse().ok()?;
+    let mm: u64 = tp.next()?.parse().ok()?;
+    let ss: u64 = tp.next()?.parse().ok()?;
+    if tp.next().is_some() || hh > 23 || mm > 59 || ss > 59 {
+        return None;
+    }
+
+    let days = days_from_civil(y, i64::from(m), i64::from(d));
+    if days < 0 {
+        return None; // pre-epoch dates can't be a quota reset
+    }
+    Some(days as u64 * 86400 + hh * 3600 + mm * 60 + ss)
+}
+
+/// Days between 1970-01-01 and the given civil date (Howard Hinnant's
+/// `days_from_civil` algorithm).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
 /// Compress a token count to a short label (`1234` → `1.2k`, `1_500_000` → `1.5M`).
 pub fn fmt_tokens(n: u64) -> String {
     if n >= 1_000_000 {
@@ -111,6 +159,41 @@ mod tests {
         assert_eq!(fmt_elapsed(3600 + 45 * 60), "1h45m");
         assert_eq!(fmt_elapsed(86400), "1d");
         assert_eq!(fmt_elapsed(8 * 86400 + 3 * 3600), "8d3h");
+    }
+
+    #[test]
+    fn iso8601_utc_parses_toisostring_output() {
+        // JS Date.toISOString() shape — the model_scoped resets_at format.
+        assert_eq!(parse_iso8601_utc("1970-01-01T00:00:00.000Z"), Some(0),);
+        assert_eq!(
+            parse_iso8601_utc("2026-07-20T07:00:00.000Z"),
+            Some(1_784_530_800),
+        );
+        // No fractional seconds is also fine.
+        assert_eq!(
+            parse_iso8601_utc("2026-07-20T07:00:00Z"),
+            Some(1_784_530_800),
+        );
+        // Explicit UTC offset spelling.
+        assert_eq!(
+            parse_iso8601_utc("2026-07-20T07:00:00+00:00"),
+            Some(1_784_530_800),
+        );
+    }
+
+    #[test]
+    fn iso8601_utc_rejects_garbage() {
+        assert_eq!(parse_iso8601_utc(""), None);
+        assert_eq!(parse_iso8601_utc("not a date"), None);
+        // Missing timezone designator — ambiguous, refuse.
+        assert_eq!(parse_iso8601_utc("2026-07-20T07:00:00"), None);
+        // Non-UTC offset — a shifted countdown is worse than unknown.
+        assert_eq!(parse_iso8601_utc("2026-07-20T07:00:00+02:00"), None);
+        // Out-of-range components.
+        assert_eq!(parse_iso8601_utc("2026-13-20T07:00:00Z"), None);
+        assert_eq!(parse_iso8601_utc("2026-07-20T25:00:00Z"), None);
+        // Pre-epoch dates can't be a quota reset.
+        assert_eq!(parse_iso8601_utc("1969-12-31T23:59:59Z"), None);
     }
 
     #[test]

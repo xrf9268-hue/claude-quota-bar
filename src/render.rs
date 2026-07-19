@@ -9,7 +9,7 @@ use crate::progress::battery_bar;
 use crate::theme::Theme;
 use crate::time_fmt::{countdown, fmt_elapsed, fmt_tokens};
 
-pub const DEFAULT_LAYOUT: &[&str] = &["5h", "7d", "model", "session", "dir"];
+pub const DEFAULT_LAYOUT: &[&str] = &["5h", "7d", "fable", "model", "session", "dir"];
 pub const BAR_WIDTH: usize = 10;
 pub const BRANCH_MAX_LEN: usize = 25;
 /// Cap on the single-dirty-file path width. Past this, fall back to `*1`
@@ -67,11 +67,21 @@ fn build_segment(name: &str, ctx: &Context) -> Option<String> {
     match name {
         "5h" => Some(build_window(ctx, "5h", window_5h(ctx.input))),
         "7d" => Some(build_window(ctx, "7d", window_7d(ctx.input))),
+        "fable" => build_fable(ctx),
         "model" => Some(build_model(ctx)),
         "session" => build_session(ctx),
         "dir" => build_dir(ctx),
         _ => None,
     }
+}
+
+/// Per-model Fable allowance (Max/Team Premium: Fable at 50% of limits).
+/// Unlike 5h/7d — which always render, `--%` when unknown — this segment
+/// hides entirely when the server hasn't shipped a Fable bucket: plans
+/// without the allowance would otherwise carry a permanently dead segment.
+fn build_fable(ctx: &Context) -> Option<String> {
+    let w = ctx.input.rate_limits.as_ref()?.fable()?;
+    Some(build_bar(ctx, "Fable", w.used_percentage, w.resets_at))
 }
 
 fn build_session(ctx: &Context) -> Option<String> {
@@ -93,10 +103,17 @@ fn window_7d(input: &Input) -> Option<&Window> {
 }
 
 fn build_window(ctx: &Context, label: &str, window: Option<&Window>) -> String {
-    let pct = window.map(|w| w.used_percentage);
+    build_bar(
+        ctx,
+        label,
+        window.map(|w| w.used_percentage),
+        window.and_then(|w| w.resets_at),
+    )
+}
+
+fn build_bar(ctx: &Context, label: &str, pct: Option<f64>, resets_at: Option<u64>) -> String {
     let bar = battery_bar(pct, ctx.theme, BAR_WIDTH);
-    let reset_text = window
-        .and_then(|w| w.resets_at)
+    let reset_text = resets_at
         .map(|r| countdown(ctx.now_unix, r))
         .unwrap_or_else(|| "--".to_string());
 
@@ -187,7 +204,7 @@ fn truncate_branch(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::ansi::strip_ansi;
-    use crate::input::{ContextWindow, Model, RateLimits, Window, Workspace};
+    use crate::input::{ContextWindow, Model, ModelScopedWindow, RateLimits, Window, Workspace};
     use crate::theme::GRAPHITE;
     use std::sync::Mutex;
 
@@ -233,6 +250,7 @@ mod tests {
                     used_percentage: 35.0,
                     resets_at: Some(1_700_000_000 + 8 * 86400 + 3 * 3600),
                 }),
+                ..Default::default()
             }),
             context_window: Some(ContextWindow {
                 context_window_size: 200_000,
@@ -512,7 +530,67 @@ mod tests {
 
     #[test]
     fn default_layout_places_session_before_dir() {
-        assert_eq!(DEFAULT_LAYOUT, &["5h", "7d", "model", "session", "dir"]);
+        assert_eq!(
+            DEFAULT_LAYOUT,
+            &["5h", "7d", "fable", "model", "session", "dir"]
+        );
+    }
+
+    #[test]
+    fn fable_segment_renders_bucket_percentage() {
+        no_color(|| {
+            let mut inp = full_input();
+            inp.rate_limits.as_mut().unwrap().model_scoped = vec![ModelScopedWindow {
+                display_name: "Fable 5".into(),
+                used_percentage: Some(18.0),
+                resets_at: Some(1_700_000_000 + 3 * 86400),
+            }];
+            let lay = layout(&["fable"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(out.contains("Fable"), "missing Fable label in {out:?}");
+            assert!(out.contains("18%"), "missing 18% in {out:?}");
+            assert!(out.contains("3d"), "missing 3d countdown in {out:?}");
+        });
+    }
+
+    #[test]
+    fn fable_segment_shows_unknown_pct_with_known_reset() {
+        no_color(|| {
+            let mut inp = full_input();
+            inp.rate_limits.as_mut().unwrap().model_scoped = vec![ModelScopedWindow {
+                display_name: "Fable".into(),
+                used_percentage: None,
+                resets_at: Some(1_700_000_000 + 3600),
+            }];
+            let lay = layout(&["fable"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(out.contains("--%"), "expected --% placeholder in {out:?}");
+            assert!(out.contains("1h"), "missing countdown in {out:?}");
+        });
+    }
+
+    #[test]
+    fn fable_segment_hidden_without_bucket() {
+        no_color(|| {
+            // No model_scoped data (today's Claude Code, or a plan without
+            // the Fable allowance) → the segment hides, it doesn't render a
+            // permanently dead "Fable[--%]".
+            let inp = full_input();
+            let lay = layout(&["fable"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert_eq!(out, "");
+        });
+    }
+
+    #[test]
+    fn fable_segment_hidden_when_rate_limits_missing() {
+        no_color(|| {
+            let mut inp = full_input();
+            inp.rate_limits = None;
+            let lay = layout(&["fable"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert_eq!(out, "");
+        });
     }
 
     #[test]

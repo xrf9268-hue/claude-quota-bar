@@ -83,6 +83,27 @@ pub struct RateLimits {
     pub five_hour: Option<Window>,
     #[serde(default)]
     pub seven_day: Option<Window>,
+    /// Per-model weekly buckets from the server `limits[]` array (e.g. the
+    /// Fable allowance on Max/Team Premium plans). Claude Code labels each
+    /// bucket with a server-supplied `display_name` ("Fable", "Fable 5").
+    /// Parsed leniently: a malformed entry is dropped instead of failing the
+    /// whole payload, because this field's wire shape is still settling.
+    #[serde(default, deserialize_with = "lenient_model_scoped")]
+    pub model_scoped: Vec<ModelScopedWindow>,
+}
+
+impl RateLimits {
+    /// The Fable usage bucket, if the server shipped one. Matches on the
+    /// server-supplied label ("Fable", "Fable 5", ...) rather than a fixed
+    /// key — that's how Claude Code itself identifies the bucket.
+    pub fn fable(&self) -> Option<&ModelScopedWindow> {
+        self.model_scoped.iter().find(|w| {
+            w.display_name
+                .trim()
+                .to_ascii_lowercase()
+                .starts_with("fable")
+        })
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Clone)]
@@ -91,6 +112,58 @@ pub struct Window {
     pub used_percentage: f64,
     #[serde(default)]
     pub resets_at: Option<u64>,
+}
+
+/// One per-model quota bucket. Normalized at parse time so the rest of the
+/// code never sees the wire variance: `used_percentage` (0-100, the shape the
+/// statusline uses for the other windows) or `utilization` (0-1, the shape of
+/// Claude Code's internal snapshot), and `resets_at` as epoch seconds or an
+/// ISO-8601 string.
+#[derive(Debug, Default, Clone)]
+pub struct ModelScopedWindow {
+    pub display_name: String,
+    /// Percentage of the bucket used (0-100), or None when the server sent
+    /// null / nothing usable.
+    pub used_percentage: Option<f64>,
+    /// Unix epoch seconds when the bucket resets, or None when absent or
+    /// unparseable.
+    pub resets_at: Option<u64>,
+}
+
+fn lenient_model_scoped<'de, D>(d: D) -> Result<Vec<ModelScopedWindow>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    let Some(arr) = v.as_array() else {
+        return Ok(Vec::new());
+    };
+    Ok(arr.iter().filter_map(model_scoped_entry).collect())
+}
+
+fn model_scoped_entry(v: &serde_json::Value) -> Option<ModelScopedWindow> {
+    let obj = v.as_object()?;
+    let display_name = obj.get("display_name")?.as_str()?.to_string();
+    // `used_percentage` (0-100) wins if both are present — it's the already-
+    // normalized statusline shape; `utilization` (0-1) is the raw fraction.
+    let used_percentage = obj
+        .get("used_percentage")
+        .and_then(serde_json::Value::as_f64)
+        .or_else(|| {
+            obj.get("utilization")
+                .and_then(serde_json::Value::as_f64)
+                .map(|u| u * 100.0)
+        })
+        .filter(|p| p.is_finite());
+    let resets_at = obj.get("resets_at").and_then(|r| {
+        r.as_u64()
+            .or_else(|| r.as_str().and_then(crate::time_fmt::parse_iso8601_utc))
+    });
+    Some(ModelScopedWindow {
+        display_name,
+        used_percentage,
+        resets_at,
+    })
 }
 
 /// Parse a Claude Code stdin payload. This is the production parse path —
@@ -190,6 +263,83 @@ mod tests {
     #[test]
     fn parse_invalid_json_errors() {
         assert!(parse("not json").is_err());
+    }
+
+    #[test]
+    fn parse_model_scoped_statusline_shape() {
+        // The shape the statusline uses for its other windows: normalized
+        // used_percentage + epoch resets_at.
+        let json = r#"{"rate_limits": {"model_scoped": [
+            {"display_name": "Fable", "used_percentage": 18, "resets_at": 1700000600}
+        ]}}"#;
+        let rl = parse(json).unwrap().rate_limits.unwrap();
+        let f = rl.fable().unwrap();
+        assert_eq!(f.used_percentage, Some(18.0));
+        assert_eq!(f.resets_at, Some(1_700_000_600));
+    }
+
+    #[test]
+    fn parse_model_scoped_internal_snapshot_shape() {
+        // Claude Code's internal snapshot shape: utilization fraction (0-1)
+        // + ISO-8601 resets_at.
+        let json = r#"{"rate_limits": {"model_scoped": [
+            {"display_name": "Fable 5", "utilization": 0.18, "resets_at": "2026-07-20T07:00:00.000Z"}
+        ]}}"#;
+        let rl = parse(json).unwrap().rate_limits.unwrap();
+        let f = rl.fable().unwrap();
+        assert_eq!(f.used_percentage, Some(18.0));
+        assert_eq!(f.resets_at, Some(1_784_530_800));
+    }
+
+    #[test]
+    fn parse_model_scoped_null_fields_are_unknown() {
+        let json = r#"{"rate_limits": {"model_scoped": [
+            {"display_name": "Fable", "utilization": null, "resets_at": null}
+        ]}}"#;
+        let rl = parse(json).unwrap().rate_limits.unwrap();
+        let f = rl.fable().unwrap();
+        assert_eq!(f.used_percentage, None);
+        assert_eq!(f.resets_at, None);
+    }
+
+    #[test]
+    fn fable_ignores_other_model_buckets() {
+        let json = r#"{"rate_limits": {"model_scoped": [
+            {"display_name": "Opus", "used_percentage": 50},
+            {"display_name": "Fable 5", "used_percentage": 18}
+        ]}}"#;
+        let rl = parse(json).unwrap().rate_limits.unwrap();
+        assert_eq!(rl.fable().unwrap().used_percentage, Some(18.0));
+        assert_eq!(rl.model_scoped.len(), 2);
+    }
+
+    #[test]
+    fn malformed_model_scoped_entry_does_not_fail_payload() {
+        // A junk entry (or the whole field being the wrong type) must drop
+        // silently — nuking the entire statusline over one experimental
+        // field would be worse than missing the segment.
+        let json = r#"{
+            "model": {"id": "claude-fable-5"},
+            "rate_limits": {
+                "five_hour": {"used_percentage": 42},
+                "model_scoped": [
+                    {"display_name": 42},
+                    "junk",
+                    {"display_name": "Fable", "used_percentage": 18}
+                ]
+            }
+        }"#;
+        let input = parse(json).unwrap();
+        let rl = input.rate_limits.unwrap();
+        assert_eq!(rl.five_hour.as_ref().unwrap().used_percentage, 42.0);
+        assert_eq!(rl.model_scoped.len(), 1);
+        assert_eq!(rl.fable().unwrap().used_percentage, Some(18.0));
+
+        let json =
+            r#"{"rate_limits": {"five_hour": {"used_percentage": 42}, "model_scoped": "wat"}}"#;
+        let rl = parse(json).unwrap().rate_limits.unwrap();
+        assert!(rl.model_scoped.is_empty());
+        assert!(rl.five_hour.is_some());
     }
 
     #[test]
