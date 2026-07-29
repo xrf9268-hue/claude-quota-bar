@@ -103,6 +103,15 @@ fn fable_segment_hidden_without_bucket() {
 }
 
 #[test]
+fn model_segment_shows_context_percentage() {
+    // full_session.json ships context_window.used_percentage = 35.5.
+    // Claude Code's own number (→ 36%) must win over the value derived
+    // from the token fields (65k/200k → 33%).
+    let (stdout, _h) = run(&fixture("full_session.json"), Some("model"));
+    assert!(stdout.contains("·36%"), "missing ctx pct in {stdout:?}");
+}
+
+#[test]
 fn layout_env_var_controls_segments() {
     let (stdout, _h) = run(&fixture("full_session.json"), Some("model"));
     assert!(stdout.contains("Opus 4.7"));

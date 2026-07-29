@@ -4,7 +4,7 @@
 
 use crate::ansi::{fg, reset};
 use crate::git::GitInfo;
-use crate::input::{Input, Window};
+use crate::input::{ContextWindow, Input, Window};
 use crate::progress::battery_bar;
 use crate::theme::Theme;
 use crate::time_fmt::{countdown, fmt_elapsed, fmt_tokens};
@@ -123,6 +123,29 @@ fn build_bar(ctx: &Context, label: &str, pct: Option<f64>, resets_at: Option<u64
     format!("{ink}{label}{r}{mute}[{r}{bar}{mute}]{r}{ink}⏰{reset_text}{r}")
 }
 
+/// Context occupancy percentage for the model segment. Claude Code's own
+/// `used_percentage` wins when it's a sane 0-100 value — it's authoritative
+/// and already accounts for the fresh-session baseline. Otherwise derive
+/// from the token fields under the same guards `build_model` applies to
+/// the token text (unknown when the count exceeds the window).
+fn context_pct(cw: &ContextWindow) -> Option<f64> {
+    if let Some(p) = cw
+        .used_percentage
+        .filter(|p| p.is_finite() && (0.0..=100.0).contains(p))
+    {
+        return Some(p);
+    }
+    if cw.context_window_size == 0 || cw.total_input_tokens > cw.context_window_size {
+        return None;
+    }
+    let tokens = if cw.total_input_tokens > 0 {
+        cw.total_input_tokens
+    } else {
+        BASELINE_TOKENS.min(cw.context_window_size)
+    };
+    Some(tokens as f64 / cw.context_window_size as f64 * 100.0)
+}
+
 fn build_model(ctx: &Context) -> String {
     let name = ctx.input.model.name();
     let model_color = fg(ctx.theme.model);
@@ -145,7 +168,20 @@ fn build_model(ctx: &Context) -> String {
                 format!("~{}", fmt_tokens(BASELINE_TOKENS))
             };
             let win_text = fmt_tokens(cw.context_window_size);
-            format!("{model_color}{name}{r}{mute}({r}{used_text}{mute}/{r}{win_text}{mute}){r}")
+            // Occupancy percentage, colored with the same 30/70 severity
+            // thresholds as the quota bars, so an approaching auto-compact
+            // reads as amber/red at a glance. Hidden when no trustworthy
+            // number exists (see context_pct).
+            let pct_text = match context_pct(cw) {
+                Some(p) => {
+                    let sev = fg(ctx.theme.severity_bg(p));
+                    format!("{mute}·{r}{sev}{}%{r}", p.round() as i64)
+                }
+                None => String::new(),
+            };
+            format!(
+                "{model_color}{name}{r}{mute}({r}{used_text}{mute}/{r}{win_text}{pct_text}{mute}){r}"
+            )
         }
         _ => format!("{model_color}{name}{r}"),
     }
@@ -255,6 +291,7 @@ mod tests {
             context_window: Some(ContextWindow {
                 context_window_size: 200_000,
                 total_input_tokens: 65_000,
+                used_percentage: None,
             }),
             ..Default::default()
         }
@@ -374,6 +411,113 @@ mod tests {
                 "a 100%-full window is legitimate: {out:?}"
             );
         });
+    }
+
+    #[test]
+    fn model_shows_stdin_used_percentage() {
+        no_color(|| {
+            let mut inp = full_input();
+            if let Some(cw) = inp.context_window.as_mut() {
+                cw.used_percentage = Some(38.0);
+            }
+            let lay = layout(&["model"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(out.contains("·38%"), "missing stdin ctx pct in {out:?}");
+        });
+    }
+
+    #[test]
+    fn model_derives_percentage_when_stdin_lacks_it() {
+        no_color(|| {
+            let mut inp = full_input();
+            // 70k of 200k → an unambiguous 35% (avoid .5 rounding edges).
+            if let Some(cw) = inp.context_window.as_mut() {
+                cw.total_input_tokens = 70_000;
+            }
+            let lay = layout(&["model"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(out.contains("·35%"), "missing derived pct in {out:?}");
+        });
+    }
+
+    #[test]
+    fn model_pct_uses_baseline_when_tokens_zero() {
+        no_color(|| {
+            let mut inp = full_input();
+            // Fresh session: ~20k baseline of 200k → 10%, matching the
+            // ~20.0k token text next to it.
+            if let Some(cw) = inp.context_window.as_mut() {
+                cw.total_input_tokens = 0;
+            }
+            let lay = layout(&["model"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(out.contains("·10%"), "missing baseline pct in {out:?}");
+        });
+    }
+
+    #[test]
+    fn model_hides_pct_when_tokens_exceed_window() {
+        no_color(|| {
+            let mut inp = full_input();
+            // Pre-2.1.132 cumulative total leaking through, and no stdin
+            // percentage to fall back on → no confident number at all.
+            if let Some(cw) = inp.context_window.as_mut() {
+                cw.total_input_tokens = 1_500_000;
+            }
+            let lay = layout(&["model"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(out.contains("--/200.0k"), "expected --/200.0k in {out:?}");
+            assert!(!out.contains('%'), "bogus pct leaked: {out:?}");
+        });
+    }
+
+    #[test]
+    fn model_trusts_stdin_pct_even_when_tokens_bogus() {
+        no_color(|| {
+            let mut inp = full_input();
+            // The token count is unusable but Claude Code's own percentage
+            // is present — show it alongside the "--" token text.
+            if let Some(cw) = inp.context_window.as_mut() {
+                cw.total_input_tokens = 1_500_000;
+                cw.used_percentage = Some(38.0);
+            }
+            let lay = layout(&["model"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(out.contains("--/200.0k"), "expected --/200.0k in {out:?}");
+            assert!(out.contains("·38%"), "missing stdin pct in {out:?}");
+        });
+    }
+
+    #[test]
+    fn model_ignores_out_of_range_stdin_pct() {
+        no_color(|| {
+            let mut inp = full_input();
+            if let Some(cw) = inp.context_window.as_mut() {
+                cw.total_input_tokens = 70_000;
+                cw.used_percentage = Some(250.0);
+            }
+            let lay = layout(&["model"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(out.contains("·35%"), "expected derived fallback: {out:?}");
+            assert!(!out.contains("250"), "out-of-range pct leaked: {out:?}");
+        });
+    }
+
+    #[test]
+    fn model_pct_uses_severity_color() {
+        // Color mode: the percentage foreground must flip to the hot
+        // severity color past 70%, mirroring the quota bars.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("NO_COLOR") };
+        let mut inp = full_input();
+        if let Some(cw) = inp.context_window.as_mut() {
+            cw.used_percentage = Some(85.0);
+        }
+        let lay = layout(&["model"]);
+        let out = render(&ctx(&inp, &lay, None));
+        let [hr, hg, hb] = GRAPHITE.bg_hot;
+        let needle = format!("\x1b[38;2;{hr};{hg};{hb}m85%");
+        assert!(out.contains(&needle), "missing hot fg on pct in {out:?}");
     }
 
     #[test]
