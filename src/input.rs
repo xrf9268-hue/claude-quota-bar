@@ -75,6 +75,11 @@ pub struct ContextWindow {
     /// older versions shipped a cumulative session total here).
     #[serde(default)]
     pub total_input_tokens: u64,
+    /// Context occupancy as a percentage (0-100), computed by Claude Code
+    /// itself on recent versions (observed on 2.1.220). Preferred over
+    /// deriving from the token fields; `None` on older versions.
+    #[serde(default)]
+    pub used_percentage: Option<f64>,
 }
 
 #[derive(Debug, Default, Deserialize, Clone)]
@@ -227,6 +232,21 @@ mod tests {
         let ctx = input.context_window.unwrap();
         assert_eq!(ctx.context_window_size, 200000);
         assert_eq!(ctx.total_input_tokens, 65000);
+        assert_eq!(ctx.used_percentage, Some(36.5));
+    }
+
+    #[test]
+    fn parse_context_window_without_used_percentage() {
+        // Older Claude Code versions don't ship the field; `null` must
+        // also read as unknown rather than failing the payload.
+        let json = r#"{"context_window": {"context_window_size": 200000}}"#;
+        let cw = parse(json).unwrap().context_window.unwrap();
+        assert_eq!(cw.used_percentage, None);
+
+        let json =
+            r#"{"context_window": {"context_window_size": 200000, "used_percentage": null}}"#;
+        let cw = parse(json).unwrap().context_window.unwrap();
+        assert_eq!(cw.used_percentage, None);
     }
 
     #[test]
