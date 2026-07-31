@@ -57,8 +57,11 @@ Don't write production code without a failing test first.
   strings, not escapes, when color is off.
 - Battery bar (`progress::battery_bar`) batches consecutive cells of the same
   background. Don't regress that — per-cell escapes blow up the output 10×.
-- Severity thresholds (`theme::WARN_THRESHOLD = 30.0`, `HOT_THRESHOLD = 70.0`)
-  are global. Don't add a config knob without a real user need.
+- Severity thresholds default to `theme::WARN_THRESHOLD = 30.0` /
+  `HOT_THRESHOLD = 70.0`, carried on `Theme` and overridable via
+  `STATUSLINE_THRESHOLDS` (`theme::parse_thresholds`; invalid values silently
+  fall back to the defaults). Don't add further config knobs without a real
+  user need.
 
 ## Critical invariants
 
@@ -125,6 +128,14 @@ These are the load-bearing decisions that aren't obvious from reading code:
    segment was removed must not blank the statusline on every prompt; a
    recognized segment that legitimately hides (`dir` with empty cwd) still
    renders empty.
+
+9. **Pace/windfall hints (`render::quota_hint`) hide rather than guess.**
+   The `▲`/`✦` glyphs divide `used_percentage` by the window's elapsed
+   fraction, which requires trusting the window length. When `resets_at` is
+   missing, already past, or farther out than the assumed length (real
+   `seven_day` payloads ship 8d+ resets), the hint is suppressed — pace math
+   against a wrong window length misleads. Model-scoped (`fable`) buckets
+   never get hints: their window length isn't contractual.
 
 ## Release process
 

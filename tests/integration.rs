@@ -7,7 +7,15 @@
 
 use assert_cmd::Command;
 use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock before epoch")
+        .as_secs()
+}
 
 fn fixture(name: &str) -> String {
     let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -109,6 +117,61 @@ fn model_segment_shows_context_percentage() {
     // from the token fields (65k/200k → 33%).
     let (stdout, _h) = run(&fixture("full_session.json"), Some("model"));
     assert!(stdout.contains("·36%"), "missing ctx pct in {stdout:?}");
+}
+
+#[test]
+fn pace_marker_renders_end_to_end() {
+    // 60% used with 4h of the 5h window still to go (20% elapsed) → far
+    // over pace → the ▲ marker sits between the bar and the countdown.
+    let json = format!(
+        r#"{{"session_id":"s","model":{{"display_name":"Opus 4.7"}},"rate_limits":{{"five_hour":{{"used_percentage":60,"resets_at":{}}}}}}}"#,
+        now_unix() + 4 * 3600
+    );
+    let (stdout, _h) = run(&json, Some("5h"));
+    assert!(stdout.contains("]▲⏰"), "missing pace marker in {stdout:?}");
+}
+
+#[test]
+fn windfall_marker_renders_end_to_end() {
+    // 42% used, 18m to reset: more than 30pp of quota is about to expire →
+    // the ✦ use-it-or-lose-it marker shows.
+    let json = format!(
+        r#"{{"session_id":"s","model":{{"display_name":"Opus 4.7"}},"rate_limits":{{"five_hour":{{"used_percentage":42,"resets_at":{}}}}}}}"#,
+        now_unix() + 18 * 60
+    );
+    let (stdout, _h) = run(&json, Some("5h"));
+    assert!(
+        stdout.contains("]✦⏰"),
+        "missing windfall marker in {stdout:?}"
+    );
+}
+
+#[test]
+fn thresholds_env_var_recolors_severity() {
+    // 42% used is amber under the default 30/70 thresholds but must stay
+    // green when STATUSLINE_THRESHOLDS raises the warn flip to 50%.
+    let home = TempDir::new().expect("tempdir");
+    let json = format!(
+        r#"{{"session_id":"s","rate_limits":{{"five_hour":{{"used_percentage":42,"resets_at":{}}}}}}}"#,
+        now_unix() + 3600
+    );
+    let mut cmd = Command::cargo_bin("claude-quota-bar").unwrap();
+    cmd.env_remove("NO_COLOR")
+        .env("HOME", home.path())
+        .env("STATUSLINE_LAYOUT", "5h")
+        .env("STATUSLINE_THRESHOLDS", "50,80");
+    let out = cmd.write_stdin(json).assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    let [okr, okg, okb] = claude_quota_bar::theme::GRAPHITE.bg_ok;
+    let [wr, wg, wb] = claude_quota_bar::theme::GRAPHITE.bg_warn;
+    assert!(
+        stdout.contains(&format!("\x1b[48;2;{okr};{okg};{okb}m")),
+        "expected ok bg at 42% with 50,80 thresholds: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains(&format!("\x1b[48;2;{wr};{wg};{wb}m")),
+        "warn bg leaked at 42% with 50,80 thresholds: {stdout:?}"
+    );
 }
 
 #[test]

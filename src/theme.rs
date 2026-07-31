@@ -25,6 +25,10 @@ pub struct Theme {
     pub model: [u8; 3],
     /// Accent color when the dirty file count is non-zero.
     pub warn: [u8; 3],
+    /// Usage percentage at which severity flips green→yellow.
+    pub warn_threshold: f64,
+    /// Usage percentage at which severity flips yellow→red.
+    pub hot_threshold: f64,
 }
 
 pub const WARN_THRESHOLD: f64 = 30.0;
@@ -61,18 +65,33 @@ pub const GRAPHITE: Theme = Theme {
     // Anthropic Orange — dirty-file count indicator; visually distinct
     // from `bg_warn`'s amber so it doesn't blend into the bar.
     warn: [217, 119, 87],
+    warn_threshold: WARN_THRESHOLD,
+    hot_threshold: HOT_THRESHOLD,
 };
 
 impl Theme {
     pub fn severity_bg(&self, pct: f64) -> [u8; 3] {
-        if pct >= HOT_THRESHOLD {
+        if pct >= self.hot_threshold {
             self.bg_hot
-        } else if pct >= WARN_THRESHOLD {
+        } else if pct >= self.warn_threshold {
             self.bg_warn
         } else {
             self.bg_ok
         }
     }
+}
+
+/// Parse a `STATUSLINE_THRESHOLDS` value (`"warn,hot"` percentages, e.g.
+/// `"50,80"`). Returns None on anything that isn't a sane
+/// `0 <= warn < hot <= 100` pair — the caller keeps the defaults, because a
+/// statusline must degrade rather than crash or mis-color.
+pub fn parse_thresholds(s: &str) -> Option<(f64, f64)> {
+    let (warn, hot) = s.split_once(',')?;
+    let warn: f64 = warn.trim().parse().ok()?;
+    let hot: f64 = hot.trim().parse().ok()?;
+    // The half-open range also rejects NaN/inf: a NaN bound never contains,
+    // and an infinite `hot` fails the <= 100 check.
+    ((0.0..hot).contains(&warn) && hot <= 100.0).then_some((warn, hot))
 }
 
 #[cfg(test)]
@@ -97,5 +116,42 @@ mod tests {
         assert_eq!(GRAPHITE.severity_bg(HOT_THRESHOLD), GRAPHITE.bg_hot);
         assert_eq!(GRAPHITE.severity_bg(100.0), GRAPHITE.bg_hot);
         assert_eq!(GRAPHITE.severity_bg(150.0), GRAPHITE.bg_hot);
+    }
+
+    #[test]
+    fn severity_bg_respects_custom_thresholds() {
+        let t = Theme {
+            warn_threshold: 50.0,
+            hot_threshold: 80.0,
+            ..GRAPHITE
+        };
+        assert_eq!(t.severity_bg(42.0), t.bg_ok);
+        assert_eq!(t.severity_bg(50.0), t.bg_warn);
+        assert_eq!(t.severity_bg(79.9), t.bg_warn);
+        assert_eq!(t.severity_bg(80.0), t.bg_hot);
+    }
+
+    #[test]
+    fn parse_thresholds_accepts_pair() {
+        assert_eq!(parse_thresholds("50,80"), Some((50.0, 80.0)));
+        assert_eq!(parse_thresholds(" 50 , 80 "), Some((50.0, 80.0)));
+        assert_eq!(parse_thresholds("0,100"), Some((0.0, 100.0)));
+        assert_eq!(parse_thresholds("12.5,87.5"), Some((12.5, 87.5)));
+    }
+
+    #[test]
+    fn parse_thresholds_rejects_garbage() {
+        // Anything not a sane 0 <= warn < hot <= 100 pair falls back to the
+        // defaults — a statusline must degrade, never crash or mis-color.
+        assert_eq!(parse_thresholds(""), None);
+        assert_eq!(parse_thresholds("50"), None);
+        assert_eq!(parse_thresholds("80,50"), None);
+        assert_eq!(parse_thresholds("50,50"), None);
+        assert_eq!(parse_thresholds("50,150"), None);
+        assert_eq!(parse_thresholds("-5,50"), None);
+        assert_eq!(parse_thresholds("a,b"), None);
+        assert_eq!(parse_thresholds("NaN,80"), None);
+        assert_eq!(parse_thresholds("50,inf"), None);
+        assert_eq!(parse_thresholds("50,80,90"), None);
     }
 }

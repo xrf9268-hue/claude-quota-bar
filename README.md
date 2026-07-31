@@ -5,7 +5,7 @@ Battery-style 5-hour / 7-day quota bars, context-window indicator, session
 elapsed time, and `dir:branch *N` — at ~2.5ms cold start and a ~0.5MB binary.
 
 ```
-5h[███42%░░░░]⏰26m | 7d[███35%░░░░]⏰8d3h | Opus 4.7(71.0k/1.0M·7%) | ⏳2h15m | proj:main *3
+5h[███42%░░░░]✦⏰26m | 7d[███35%░░░░]⏰8d3h | Opus 4.7(71.0k/1.0M·7%) | ⏳2h15m | proj:main *3
 ```
 
 Requires Claude Code ≥ 2.1.132 (where `context_window.total_input_tokens`
@@ -51,12 +51,30 @@ Default layout: `5h,7d,fable,model,session,dir`.
 
 | Segment | Source | What it shows |
 |---------|--------|---------------|
-| `5h`    | `rate_limits.five_hour` | Battery bar with `%` inside, plus `⏰` countdown to reset |
+| `5h`    | `rate_limits.five_hour` | Battery bar with `%` inside, `⏰` countdown to reset, and pace hints (`▲`/`✦`, see below) |
 | `7d`    | `rate_limits.seven_day` | Same, weekly window |
 | `fable` | `rate_limits.model_scoped` | Same, for the per-model Fable allowance (Max/Team Premium: Fable at 50% of limits). Hidden until the server ships a Fable bucket |
 | `model` | `model` + `context_window` | `Opus 4.7(71.0k/1.0M·7%)` — model, ctx tokens used / window, and ctx occupancy % (Claude Code's own `used_percentage` when shipped, derived from the token counts otherwise) |
 | `session` | `cost.total_duration_ms` | `⏳2h15m` — wall-clock time this session |
 | `dir`   | `workspace.current_dir` + git | `proj:main *3 ↑1 ↓2` — dir, branch, dirty count, ahead/behind |
+
+### Pace hints
+
+The `5h`/`7d` bars compare quota used against how much of the window has
+elapsed — both are known, since the window length is fixed and `resets_at` is
+in the payload. One glyph can appear between the bar and the countdown:
+
+- `▲` — usage runs ≥10 percentage points ahead of elapsed time (amber; red at
+  ≥25pp). At this pace you hit the wall before the reset.
+- `✦` — the window resets within 10% of its length and ≥30% of the quota is
+  still unused (green). Expiring allowance: use it or lose it.
+
+No glyph means on pace or comfortably under — usage trails wall-clock most of
+the time (nights, weekends), so a "below pace" marker would be permanently lit
+noise. Hints hide when `resets_at` is missing, already past, or farther out
+than the window length itself (observed on real `7d` payloads — pace math
+against a wrong window length would mislead). The `fable` bar never shows
+hints: model-scoped buckets carry no contractual window length.
 
 ### How `session` counts time
 
@@ -89,10 +107,13 @@ Configured via environment variables:
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `STATUSLINE_LAYOUT` | `5h,7d,fable,model,session,dir` | Comma-separated segment names (order matters) |
+| `STATUSLINE_THRESHOLDS` | `30,70` | Severity flip points (green→yellow→red) as `warn,hot` percentages |
 | `NO_COLOR` | unset | If set, strips all ANSI — falls back to `█`/`░` glyphs |
 
-Severity thresholds (green / yellow / red) flip at 30% and 70% used — for the
-quota bars and the ctx occupancy percentage alike.
+Severity thresholds (green / yellow / red) flip at 30% and 70% used by
+default — for the quota bars and the ctx occupancy percentage alike. Override
+with e.g. `STATUSLINE_THRESHOLDS=50,80`; unparseable values silently fall back
+to the defaults.
 
 ## Development
 
