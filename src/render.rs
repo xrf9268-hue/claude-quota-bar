@@ -21,6 +21,23 @@ pub const DIRTY_FILE_MAX_LEN: usize = 30;
 /// bar never starts at a misleading 0%.
 const BASELINE_TOKENS: u64 = 20_000;
 
+/// Contractual window lengths for the pace/windfall hints. Only the 5h/7d
+/// windows get hints — model-scoped buckets carry no guaranteed length.
+const WINDOW_5H_SECS: u64 = 5 * 3600;
+const WINDOW_7D_SECS: u64 = 7 * 86400;
+/// Pace marker (`▲`) appears when usage% runs ahead of the window's elapsed
+/// time by at least this many percentage points; the hot variant takes over
+/// past the second bound. Under-pace gets no marker: usage trails wall-clock
+/// most of the time (nights, weekends), so a "below pace" glyph would be
+/// permanently lit noise — the absence of `▲` already says "fine".
+const PACE_WARN_DELTA_PP: f64 = 10.0;
+const PACE_HOT_DELTA_PP: f64 = 25.0;
+/// Windfall marker (`✦`): the window resets within this fraction of its
+/// length while at least this much quota is still unused — expiring
+/// allowance, burn it freely.
+const WINDFALL_MAX_REMAINING_FRAC: f64 = 0.10;
+const WINDFALL_MIN_UNUSED_PP: f64 = 30.0;
+
 pub struct Context<'a> {
     pub input: &'a Input,
     pub theme: &'a Theme,
@@ -65,8 +82,18 @@ pub fn render(ctx: &Context) -> String {
 
 fn build_segment(name: &str, ctx: &Context) -> Option<String> {
     match name {
-        "5h" => Some(build_window(ctx, "5h", window_5h(ctx.input))),
-        "7d" => Some(build_window(ctx, "7d", window_7d(ctx.input))),
+        "5h" => Some(build_window(
+            ctx,
+            "5h",
+            window_5h(ctx.input),
+            WINDOW_5H_SECS,
+        )),
+        "7d" => Some(build_window(
+            ctx,
+            "7d",
+            window_7d(ctx.input),
+            WINDOW_7D_SECS,
+        )),
         "fable" => build_fable(ctx),
         "model" => Some(build_model(ctx)),
         "session" => build_session(ctx),
@@ -81,7 +108,13 @@ fn build_segment(name: &str, ctx: &Context) -> Option<String> {
 /// without the allowance would otherwise carry a permanently dead segment.
 fn build_fable(ctx: &Context) -> Option<String> {
     let w = ctx.input.rate_limits.as_ref()?.fable()?;
-    Some(build_bar(ctx, "Fable", w.used_percentage, w.resets_at))
+    Some(build_bar(
+        ctx,
+        "Fable",
+        w.used_percentage,
+        w.resets_at,
+        None,
+    ))
 }
 
 fn build_session(ctx: &Context) -> Option<String> {
@@ -102,25 +135,74 @@ fn window_7d(input: &Input) -> Option<&Window> {
     input.rate_limits.as_ref()?.seven_day.as_ref()
 }
 
-fn build_window(ctx: &Context, label: &str, window: Option<&Window>) -> String {
+fn build_window(ctx: &Context, label: &str, window: Option<&Window>, window_secs: u64) -> String {
     build_bar(
         ctx,
         label,
         window.map(|w| w.used_percentage),
         window.and_then(|w| w.resets_at),
+        Some(window_secs),
     )
 }
 
-fn build_bar(ctx: &Context, label: &str, pct: Option<f64>, resets_at: Option<u64>) -> String {
+fn build_bar(
+    ctx: &Context,
+    label: &str,
+    pct: Option<f64>,
+    resets_at: Option<u64>,
+    window_secs: Option<u64>,
+) -> String {
     let bar = battery_bar(pct, ctx.theme, BAR_WIDTH);
     let reset_text = resets_at
         .map(|r| countdown(ctx.now_unix, r))
         .unwrap_or_else(|| "--".to_string());
+    let hint = quota_hint(ctx, pct, resets_at, window_secs);
 
     let mute = fg(ctx.theme.mute);
     let ink = fg(ctx.theme.ink);
     let r = reset();
-    format!("{ink}{label}{r}{mute}[{r}{bar}{mute}]{r}{ink}⏰{reset_text}{r}")
+    format!("{ink}{label}{r}{mute}[{r}{bar}{mute}]{r}{hint}{ink}⏰{reset_text}{r}")
+}
+
+/// One optional glyph between the bar and the countdown: `▲` when usage runs
+/// ahead of the window's elapsed time (you'll hit the wall before the reset),
+/// `✦` when the reset is imminent with a large chunk unused (expiring
+/// allowance — burn it freely). Both derive from data already on screen; the
+/// glyph just does the division for you. Empty when there's nothing to say,
+/// or when the math can't be trusted (no resets_at, reset already past, or
+/// resets_at farther out than the window length itself — observed on real
+/// seven_day payloads, where the assumed length would be wrong).
+fn quota_hint(
+    ctx: &Context,
+    pct: Option<f64>,
+    resets_at: Option<u64>,
+    window_secs: Option<u64>,
+) -> String {
+    let (Some(pct), Some(resets_at), Some(win)) = (pct, resets_at, window_secs) else {
+        return String::new();
+    };
+    if win == 0 || resets_at <= ctx.now_unix {
+        return String::new();
+    }
+    let remaining = resets_at - ctx.now_unix;
+    if remaining > win {
+        return String::new();
+    }
+    let r = reset();
+    let remaining_frac = remaining as f64 / win as f64;
+    if remaining_frac <= WINDFALL_MAX_REMAINING_FRAC && 100.0 - pct >= WINDFALL_MIN_UNUSED_PP {
+        return format!("{}✦{r}", fg(ctx.theme.bg_ok));
+    }
+    // Severity backgrounds double as marker foregrounds: they read fine on a
+    // dark terminal and keep the glyph's color story aligned with the bar.
+    let delta = pct - (1.0 - remaining_frac) * 100.0;
+    if delta >= PACE_HOT_DELTA_PP {
+        format!("{}▲{r}", fg(ctx.theme.bg_hot))
+    } else if delta >= PACE_WARN_DELTA_PP {
+        format!("{}▲{r}", fg(ctx.theme.bg_warn))
+    } else {
+        String::new()
+    }
 }
 
 /// Context occupancy percentage for the model segment. Claude Code's own
@@ -735,6 +817,158 @@ mod tests {
             let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
             assert_eq!(out, "");
         });
+    }
+
+    #[test]
+    fn pace_marker_when_over_pace() {
+        no_color(|| {
+            let mut inp = full_input();
+            // 42% used with 3h30m of the 5h window remaining → 30% elapsed →
+            // 12pp over pace → marker between the bar and the countdown.
+            if let Some(w) = inp.rate_limits.as_mut().unwrap().five_hour.as_mut() {
+                w.resets_at = Some(1_700_000_000 + 12_600);
+            }
+            let lay = layout(&["5h"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(out.contains("]▲⏰"), "missing pace marker in {out:?}");
+        });
+    }
+
+    #[test]
+    fn pace_marker_hidden_when_on_pace() {
+        no_color(|| {
+            let mut inp = full_input();
+            // 50% used, 50% elapsed — dead on pace, stay quiet.
+            if let Some(w) = inp.rate_limits.as_mut().unwrap().five_hour.as_mut() {
+                w.used_percentage = 50.0;
+                w.resets_at = Some(1_700_000_000 + 9_000);
+            }
+            let lay = layout(&["5h"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(
+                !out.contains('▲') && !out.contains('✦'),
+                "unexpected marker in {out:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn pace_marker_hidden_without_resets_at() {
+        no_color(|| {
+            let mut inp = full_input();
+            if let Some(w) = inp.rate_limits.as_mut().unwrap().five_hour.as_mut() {
+                w.used_percentage = 90.0;
+                w.resets_at = None;
+            }
+            let lay = layout(&["5h"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(
+                !out.contains('▲') && !out.contains('✦'),
+                "marker without resets_at in {out:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn pace_marker_hidden_when_reset_beyond_window() {
+        no_color(|| {
+            // full_input's 7d window resets 8d3h out — beyond the assumed 7d
+            // length (a shape observed in real payloads). Pace math against a
+            // wrong window length would mislead: hide.
+            let inp = full_input();
+            let lay = layout(&["7d"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(
+                !out.contains('▲') && !out.contains('✦'),
+                "marker on out-of-window reset in {out:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn windfall_marker_when_reset_imminent_with_headroom() {
+        no_color(|| {
+            // full_input's 5h window: 42% used, 26m left (<10% of the window)
+            // → 58pp of quota about to expire → use-it-or-lose-it marker.
+            let inp = full_input();
+            let lay = layout(&["5h"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(out.contains("]✦⏰"), "missing windfall marker in {out:?}");
+        });
+    }
+
+    #[test]
+    fn windfall_marker_hidden_when_quota_mostly_used() {
+        no_color(|| {
+            let mut inp = full_input();
+            // 85% used with 26m left: only 15pp unused — nothing to celebrate,
+            // and usage trails the 91% elapsed, so no pace marker either.
+            if let Some(w) = inp.rate_limits.as_mut().unwrap().five_hour.as_mut() {
+                w.used_percentage = 85.0;
+            }
+            let lay = layout(&["5h"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(
+                !out.contains('▲') && !out.contains('✦'),
+                "unexpected marker in {out:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn fable_segment_has_no_pace_marker() {
+        no_color(|| {
+            // Model-scoped buckets carry no contractual window length; pace or
+            // windfall hints against a guessed length would mislead.
+            let mut inp = full_input();
+            inp.rate_limits.as_mut().unwrap().model_scoped = vec![ModelScopedWindow {
+                display_name: "Fable".into(),
+                used_percentage: Some(5.0),
+                resets_at: Some(1_700_000_000 + 1_800),
+            }];
+            let lay = layout(&["fable"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(
+                !out.contains('▲') && !out.contains('✦'),
+                "marker on fable segment in {out:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn pace_marker_uses_warn_color_when_moderately_over() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("NO_COLOR") };
+        let mut inp = full_input();
+        // +12pp over pace: warn-colored marker (hot is reserved for >=25pp).
+        if let Some(w) = inp.rate_limits.as_mut().unwrap().five_hour.as_mut() {
+            w.resets_at = Some(1_700_000_000 + 12_600);
+        }
+        let lay = layout(&["5h"]);
+        let out = render(&ctx(&inp, &lay, None));
+        let [r, g, b] = GRAPHITE.bg_warn;
+        let needle = format!("\x1b[38;2;{r};{g};{b}m▲");
+        assert!(
+            out.contains(&needle),
+            "missing warn fg on marker in {out:?}"
+        );
+    }
+
+    #[test]
+    fn pace_marker_uses_hot_color_when_far_over() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::remove_var("NO_COLOR") };
+        let mut inp = full_input();
+        // 60% used at 20% elapsed → +40pp → hot-colored marker.
+        if let Some(w) = inp.rate_limits.as_mut().unwrap().five_hour.as_mut() {
+            w.used_percentage = 60.0;
+            w.resets_at = Some(1_700_000_000 + 14_400);
+        }
+        let lay = layout(&["5h"]);
+        let out = render(&ctx(&inp, &lay, None));
+        let [r, g, b] = GRAPHITE.bg_hot;
+        let needle = format!("\x1b[38;2;{r};{g};{b}m▲");
+        assert!(out.contains(&needle), "missing hot fg on marker in {out:?}");
     }
 
     #[test]

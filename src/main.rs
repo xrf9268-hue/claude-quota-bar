@@ -62,9 +62,19 @@ fn main() {
             .collect(),
     };
 
+    // Severity thresholds: env override, silently falling back to the
+    // 30/70 defaults on anything unparseable (degrade, never crash).
+    let mut active_theme = theme::GRAPHITE;
+    if let Ok(s) = std::env::var("STATUSLINE_THRESHOLDS") {
+        if let Some((warn, hot)) = theme::parse_thresholds(&s) {
+            active_theme.warn_threshold = warn;
+            active_theme.hot_threshold = hot;
+        }
+    }
+
     let ctx = render::Context {
         input: &data,
-        theme: &theme::GRAPHITE,
+        theme: &active_theme,
         now_unix,
         git_info: git_info.as_ref(),
         layout: &layout,
@@ -87,8 +97,9 @@ fn print_help() {
          \x20 claude-quota-bar [--version] [--help]\n\
          \n\
          Environment:\n\
-         \x20 STATUSLINE_LAYOUT  Comma-separated segments (default: 5h,7d,fable,model,session,dir)\n\
-         \x20 NO_COLOR           Disable ANSI color; fall back to block glyphs",
+         \x20 STATUSLINE_LAYOUT      Comma-separated segments (default: 5h,7d,fable,model,session,dir)\n\
+         \x20 STATUSLINE_THRESHOLDS  Severity flip points as \"warn,hot\" percentages (default: 30,70)\n\
+         \x20 NO_COLOR               Disable ANSI color; fall back to block glyphs",
         ver = env!("CARGO_PKG_VERSION"),
     );
 }
