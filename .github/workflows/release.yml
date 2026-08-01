@@ -33,7 +33,7 @@ jobs:
       releases_created: ${{ steps.release-plz.outputs.releases_created }}
       releases: ${{ steps.release-plz.outputs.releases }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           fetch-depth: 0
 
@@ -42,7 +42,7 @@ jobs:
 
       - name: Run release-plz
         id: release-plz
-        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -96,7 +96,7 @@ jobs:
     steps:
       # Build the exact commit release-plz tagged, not the workflow's trigger
       # SHA — they can differ if other commits land on main around the merge.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ fromJSON(needs.release-plz.outputs.releases)[0].tag }}
 
@@ -174,7 +174,7 @@ jobs:
     permissions:
       contents: write # upload assets to the release release-plz created
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ fromJSON(needs.release-plz.outputs.releases)[0].tag }}
 
@@ -209,11 +209,11 @@ jobs:
     steps:
       # Publish the npm packages from the released tag so the version and
       # bundled binaries match the GitHub Release exactly.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           ref: ${{ fromJSON(needs.release-plz.outputs.releases)[0].tag }}
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           # Node 24 ships with npm 11+; OIDC trusted publishing needs ≥ 11.5.
           # We avoid `npm install -g npm@latest` because in-place npm upgrades
