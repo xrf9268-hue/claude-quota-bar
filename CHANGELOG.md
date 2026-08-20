@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.7.0...v0.8.0) - 2026-08-20
+
+### Added
+
+- add pace/windfall hints and configurable severity thresholds ([#26](https://github.com/xrf9268-hue/claude-quota-bar/pull/26))
+- show context occupancy percentage in model segment ([#24](https://github.com/xrf9268-hue/claude-quota-bar/pull/24))
+
+### Other
+
+- bump the actions group with 3 updates ([#28](https://github.com/xrf9268-hue/claude-quota-bar/pull/28))
+- bump the cargo group with 2 updates ([#27](https://github.com/xrf9268-hue/claude-quota-bar/pull/27))
+
 ## [0.7.0](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.6.0...v0.7.0) - 2026-07-19
 
 ### Added
