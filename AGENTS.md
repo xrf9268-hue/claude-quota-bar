@@ -132,7 +132,14 @@ These are the load-bearing decisions that aren't obvious from reading code:
    recognized segment that legitimately hides (`dir` with empty cwd) still
    renders empty. Recognition checks `render::SEGMENTS`, not `DEFAULT_LAYOUT`
    — opt-in segments (`sid`) are absent from the default and would otherwise
-   be mistaken for stale config.
+   be mistaken for stale config. `render::LINE_BREAK` (`nl`) is deliberately
+   *not* in `SEGMENTS`: it carries no content, so a layout of only line
+   breaks must still count as unrecognized.
+
+10. **An empty status row is never emitted** (`render::render`). Claude Code
+    prints each output line as its own row, so a `nl` whose row rendered
+    nothing (`sid` with no `session_id`) would silently cost a terminal row
+    on every prompt.
 
 9. **Pace/windfall hints (`render::quota_hint`) hide rather than guess.**
    The `▲`/`✦` glyphs divide `used_percentage` by the window's elapsed

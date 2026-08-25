@@ -211,3 +211,17 @@ fn sid_len_env_var_truncates_session_id() {
     let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
     assert_eq!(stdout.trim(), "#3f9a1c2b");
 }
+
+#[test]
+fn nl_token_splits_output_into_two_rows() {
+    let home = TempDir::new().expect("tempdir");
+    let json = format!(
+        r#"{{"session_id":"3f9a1c2b-7d4e-4a10-9c33-8b21ef0d55aa","rate_limits":{{"five_hour":{{"used_percentage":42,"resets_at":{}}}}}}}"#,
+        now_unix() + 3600
+    );
+    let stdout = run_in_home(&json, Some("5h,nl,sid"), &home);
+    let rows: Vec<&str> = stdout.lines().collect();
+    assert_eq!(rows.len(), 2, "expected two status rows in {stdout:?}");
+    assert!(rows[0].contains("42%"), "row 1 in {stdout:?}");
+    assert_eq!(rows[1], "#3f9a1c2b-7d4e-4a10-9c33-8b21ef0d55aa");
+}

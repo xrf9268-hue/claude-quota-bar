@@ -107,6 +107,7 @@ fn print_help() {
          \n\
          Environment:\n\
          \x20 STATUSLINE_LAYOUT      Comma-separated segments (default: 5h,7d,fable,model,session,dir)\n\
+         \x20                        The token `nl` breaks the line into a second status row\n\
          \x20 STATUSLINE_THRESHOLDS  Severity flip points as \"warn,hot\" percentages (default: 30,70)\n\
          \x20 STATUSLINE_SID_LEN     Characters of the session id the `sid` segment prints (default: full)\n\
          \x20 NO_COLOR               Disable ANSI color; fall back to block glyphs",
