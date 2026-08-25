@@ -183,3 +183,31 @@ fn layout_env_var_controls_segments() {
         "5h should be hidden when layout=model: {stdout:?}"
     );
 }
+
+#[test]
+fn sid_segment_prints_full_session_id() {
+    let home = TempDir::new().expect("tempdir");
+    let json = r#"{"session_id":"3f9a1c2b-7d4e-4a10-9c33-8b21ef0d55aa"}"#;
+    let stdout = run_in_home(json, Some("sid"), &home);
+    assert_eq!(
+        stdout.trim(),
+        "#3f9a1c2b-7d4e-4a10-9c33-8b21ef0d55aa",
+        "sid segment must print the id alone, ready to copy"
+    );
+}
+
+#[test]
+fn sid_len_env_var_truncates_session_id() {
+    let home = TempDir::new().expect("tempdir");
+    let mut cmd = Command::cargo_bin("claude-quota-bar").unwrap();
+    cmd.env("NO_COLOR", "1")
+        .env("HOME", home.path())
+        .env("STATUSLINE_LAYOUT", "sid")
+        .env("STATUSLINE_SID_LEN", "8");
+    let out = cmd
+        .write_stdin(r#"{"session_id":"3f9a1c2b-7d4e-4a10-9c33-8b21ef0d55aa"}"#)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    assert_eq!(stdout.trim(), "#3f9a1c2b");
+}
