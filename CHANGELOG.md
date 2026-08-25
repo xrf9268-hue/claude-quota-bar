@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.1](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.8.0...v0.8.1) - 2026-08-25
+
+### Added
+
+- sid segment + nl token for a second status row ([#29](https://github.com/xrf9268-hue/claude-quota-bar/pull/29))
+
 ## [0.8.0](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.7.0...v0.8.0) - 2026-08-20
 
 ### Added
