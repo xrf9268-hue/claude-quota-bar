@@ -10,6 +10,17 @@ use crate::theme::Theme;
 use crate::time_fmt::{countdown, fmt_elapsed, fmt_tokens};
 
 pub const DEFAULT_LAYOUT: &[&str] = &["5h", "7d", "fable", "model", "session", "dir"];
+/// Every segment name `build_segment` answers to, including the opt-in ones
+/// absent from `DEFAULT_LAYOUT`. The unknown-layout guard in `render` checks
+/// against this, not the default: a `STATUSLINE_LAYOUT=sid` is a deliberate
+/// layout, not the stale-config case the guard exists to rescue.
+/// Layout token that breaks the line instead of rendering content. Claude
+/// Code prints every line of our stdout as its own status row (see
+/// `Display multiple lines` in its statusline docs). Deliberately absent
+/// from `SEGMENTS`: it carries nothing, so a layout of only line breaks is
+/// still "unrecognized" and falls back to the default.
+pub const LINE_BREAK: &str = "nl";
+pub const SEGMENTS: &[&str] = &["5h", "7d", "fable", "model", "session", "sid", "dir"];
 pub const BAR_WIDTH: usize = 10;
 pub const BRANCH_MAX_LEN: usize = 25;
 /// Cap on the single-dirty-file path width. Past this, fall back to `*1`
@@ -48,6 +59,10 @@ pub struct Context<'a> {
     /// Code's `cost.total_duration_ms`. `None` = stdin shipped no `cost`
     /// object yet (very first renders), and the segment hides.
     pub session_elapsed_secs: Option<u64>,
+    /// Characters of the session id the `sid` segment prints. `None` = the
+    /// whole id, which is the point of the segment: `claude -r <id>` wants
+    /// the full UUID, not a fingerprint.
+    pub sid_len: Option<usize>,
 }
 
 pub fn render(ctx: &Context) -> String {
@@ -60,10 +75,8 @@ pub fn render(ctx: &Context) -> String {
     // a blank line every prompt with no diagnostic — fall back to the
     // default layout instead. A recognized segment that legitimately hides
     // (dir with an empty cwd) still yields empty output.
-    let recognized = ctx
-        .layout
-        .iter()
-        .any(|s| DEFAULT_LAYOUT.contains(&s.as_str()));
+    let recognized = ctx.layout.iter().any(|s| SEGMENTS.contains(&s.as_str()));
+    let mut rows: Vec<String> = Vec::new();
     let mut parts: Vec<String> = Vec::new();
     let names: &mut dyn Iterator<Item = &str> = if recognized {
         &mut ctx.layout.iter().map(String::as_str)
@@ -71,13 +84,26 @@ pub fn render(ctx: &Context) -> String {
         &mut DEFAULT_LAYOUT.iter().copied()
     };
     for seg in names {
+        if seg == LINE_BREAK {
+            // A row whose segments all hid (sid with no session_id) must
+            // not leave a blank line behind — it would cost a terminal row
+            // on every prompt for nothing.
+            if !parts.is_empty() {
+                rows.push(parts.join(&sep));
+                parts.clear();
+            }
+            continue;
+        }
         if let Some(rendered) = build_segment(seg, ctx) {
             if !rendered.is_empty() {
                 parts.push(rendered);
             }
         }
     }
-    parts.join(&sep)
+    if !parts.is_empty() {
+        rows.push(parts.join(&sep));
+    }
+    rows.join("\n")
 }
 
 fn build_segment(name: &str, ctx: &Context) -> Option<String> {
@@ -97,6 +123,7 @@ fn build_segment(name: &str, ctx: &Context) -> Option<String> {
         "fable" => build_fable(ctx),
         "model" => Some(build_model(ctx)),
         "session" => build_session(ctx),
+        "sid" => build_sid(ctx),
         "dir" => build_dir(ctx),
         _ => None,
     }
@@ -125,6 +152,25 @@ fn build_session(ctx: &Context) -> Option<String> {
     // ⏱ is EAW Narrow, so terminals advance one cell while the font draws
     // a two-cell emoji — the glyph overlaps the first digit.
     Some(format!("{ink}⏳{}{r}", fmt_elapsed(secs)))
+}
+
+/// The session id, ready to copy into `claude -r <id> --fork-session`. Opt-in
+/// (not in `DEFAULT_LAYOUT`) because a full UUID is 36 columns. Printed bare
+/// after a mute `#` so a double-click selects the id alone — terminals treat
+/// `#` as a word boundary but keep the UUID's hyphens.
+fn build_sid(ctx: &Context) -> Option<String> {
+    let id = ctx.input.session_id.trim();
+    if id.is_empty() {
+        return None;
+    }
+    let shown: String = match ctx.sid_len {
+        Some(n) if n > 0 => id.chars().take(n).collect(),
+        _ => id.to_string(),
+    };
+    let mute = fg(ctx.theme.mute);
+    let ink = fg(ctx.theme.ink);
+    let r = reset();
+    Some(format!("{mute}#{r}{ink}{shown}{r}"))
 }
 
 fn window_5h(input: &Input) -> Option<&Window> {
@@ -347,6 +393,7 @@ mod tests {
             git_info: git,
             layout,
             session_elapsed_secs: None,
+            sid_len: None,
         }
     }
 
@@ -1074,6 +1121,112 @@ mod tests {
                 out.contains("Opus 4.7"),
                 "expected default fallback: {out:?}"
             );
+        });
+    }
+
+    #[test]
+    fn sid_segment_renders_full_session_id() {
+        no_color(|| {
+            let mut inp = full_input();
+            inp.session_id = "3f9a1c2b-7d4e-4a10-9c33-8b21ef0d55aa".into();
+            let lay = layout(&["sid"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(
+                out.contains("3f9a1c2b-7d4e-4a10-9c33-8b21ef0d55aa"),
+                "missing full session id in {out:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn sid_segment_truncates_to_configured_len() {
+        no_color(|| {
+            let mut inp = full_input();
+            inp.session_id = "3f9a1c2b-7d4e-4a10-9c33-8b21ef0d55aa".into();
+            let lay = layout(&["sid"]);
+            let mut c = ctx(&inp, &lay, None);
+            c.sid_len = Some(8);
+            let out = strip_ansi(&render(&c));
+            assert!(out.contains("3f9a1c2b"), "missing prefix in {out:?}");
+            assert!(!out.contains("7d4e"), "not truncated: {out:?}");
+        });
+    }
+
+    #[test]
+    fn sid_segment_hides_without_session_id() {
+        no_color(|| {
+            let inp = full_input();
+            let lay = layout(&["sid", "5h"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(
+                out.starts_with("5h"),
+                "empty sid left a stray token: {out:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn sid_only_layout_is_not_treated_as_unknown() {
+        no_color(|| {
+            // "sid" is opt-in, so it is absent from DEFAULT_LAYOUT. The
+            // unknown-layout guard must still recognize it, or a
+            // STATUSLINE_LAYOUT=sid would render the whole default line.
+            let mut inp = full_input();
+            inp.session_id = "3f9a1c2b-7d4e-4a10-9c33-8b21ef0d55aa".into();
+            let lay = layout(&["sid"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(!out.contains("42%"), "fell back to default layout: {out:?}");
+        });
+    }
+
+    #[test]
+    fn nl_token_starts_a_new_row() {
+        no_color(|| {
+            let mut inp = full_input();
+            inp.session_id = "3f9a1c2b-7d4e-4a10-9c33-8b21ef0d55aa".into();
+            let lay = layout(&["5h", "nl", "sid"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            let rows: Vec<&str> = out.lines().collect();
+            assert_eq!(rows.len(), 2, "expected two rows in {out:?}");
+            assert!(rows[0].contains("42%"), "row 1: {out:?}");
+            assert!(rows[1].starts_with('#'), "row 2: {out:?}");
+        });
+    }
+
+    #[test]
+    fn nl_with_nothing_after_it_emits_no_empty_row() {
+        no_color(|| {
+            // sid hides without a session_id; the row it would have filled
+            // must vanish with it, not leave a blank line eating a terminal
+            // row every prompt.
+            let inp = full_input();
+            let lay = layout(&["5h", "nl", "sid"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert_eq!(out.lines().count(), 1, "blank row emitted: {out:?}");
+        });
+    }
+
+    #[test]
+    fn leading_nl_emits_no_empty_row() {
+        no_color(|| {
+            let inp = full_input();
+            let lay = layout(&["nl", "5h"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert_eq!(out.lines().count(), 1, "leading blank row: {out:?}");
+            assert!(out.contains("42%"));
+        });
+    }
+
+    #[test]
+    fn nl_only_layout_falls_back_to_default() {
+        no_color(|| {
+            // `nl` alone carries no content, so it must not count as a
+            // recognized layout — otherwise a typo'd STATUSLINE_LAYOUT
+            // blanks the bar instead of falling back.
+            let inp = full_input();
+            let lay = layout(&["nl"]);
+            let out = strip_ansi(&render(&ctx(&inp, &lay, None)));
+            assert!(out.contains("42%"), "expected default fallback: {out:?}");
         });
     }
 }

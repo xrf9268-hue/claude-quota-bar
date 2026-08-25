@@ -72,6 +72,14 @@ fn main() {
         }
     }
 
+    // Session-id width: `full` (or anything unparseable) prints the whole
+    // id, which is what `claude -r <id>` needs; a number trims it to a
+    // fingerprint for people who only want to tell sessions apart.
+    let sid_len = std::env::var("STATUSLINE_SID_LEN")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0);
+
     let ctx = render::Context {
         input: &data,
         theme: &active_theme,
@@ -79,6 +87,7 @@ fn main() {
         git_info: git_info.as_ref(),
         layout: &layout,
         session_elapsed_secs,
+        sid_len,
     };
 
     let line = render::render(&ctx);
@@ -98,7 +107,9 @@ fn print_help() {
          \n\
          Environment:\n\
          \x20 STATUSLINE_LAYOUT      Comma-separated segments (default: 5h,7d,fable,model,session,dir)\n\
+         \x20                        The token `nl` breaks the line into a second status row\n\
          \x20 STATUSLINE_THRESHOLDS  Severity flip points as \"warn,hot\" percentages (default: 30,70)\n\
+         \x20 STATUSLINE_SID_LEN     Characters of the session id the `sid` segment prints (default: full)\n\
          \x20 NO_COLOR               Disable ANSI color; fall back to block glyphs",
         ver = env!("CARGO_PKG_VERSION"),
     );

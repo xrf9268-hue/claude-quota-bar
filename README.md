@@ -56,6 +56,10 @@ Default layout: `5h,7d,fable,model,session,dir`.
 | `fable` | `rate_limits.model_scoped` | Same, for the per-model Fable allowance (Max/Team Premium: Fable at 50% of limits). Hidden until the server ships a Fable bucket |
 | `model` | `model` + `context_window` | `Opus 4.7(71.0k/1.0M·7%)` — model, ctx tokens used / window, and ctx occupancy % (Claude Code's own `used_percentage` when shipped, derived from the token counts otherwise) |
 | `session` | `cost.total_duration_ms` | `⏳2h15m` — wall-clock time this session |
+| `sid`   | `session_id` | `#3f9a1c2b-7d4e-4a10-9c33-8b21ef0d55aa` — the session id, opt-in (see below) |
+
+Plus one non-segment token: `nl` breaks the line, so the remaining segments
+render as a second status row.
 | `dir`   | `workspace.current_dir` + git | `proj:main *3 ↑1 ↓2` — dir, branch, dirty count, ahead/behind |
 
 ### Pace hints
@@ -108,12 +112,53 @@ Configured via environment variables:
 |----------|---------|---------|
 | `STATUSLINE_LAYOUT` | `5h,7d,fable,model,session,dir` | Comma-separated segment names (order matters) |
 | `STATUSLINE_THRESHOLDS` | `30,70` | Severity flip points (green→yellow→red) as `warn,hot` percentages |
+| `STATUSLINE_SID_LEN` | unset (full id) | Characters of the session id the `sid` segment prints |
 | `NO_COLOR` | unset | If set, strips all ANSI — falls back to `█`/`░` glyphs |
 
 Severity thresholds (green / yellow / red) flip at 30% and 70% used by
 default — for the quota bars and the ctx occupancy percentage alike. Override
 with e.g. `STATUSLINE_THRESHOLDS=50,80`; unparseable values silently fall back
 to the defaults.
+
+### Session id (`sid`)
+
+Not in the default layout — a full UUID is 36 columns. Add it when you want the
+id on screen to copy, instead of digging it out of `/status`:
+
+```sh
+STATUSLINE_LAYOUT=5h,7d,model,session,sid,dir
+```
+
+It pairs with `claude -r <session_id> --fork-session`, which forks the current
+conversation into a new session — a side chat in another pane, or a small
+independent task — leaving the original untouched. The id prints bare after a
+mute `#` so a double-click selects the UUID alone. Set
+`STATUSLINE_SID_LEN=8` if you only want enough to tell sessions apart.
+
+Those 36 columns fit better on a row of their own. The layout token `nl`
+breaks the line, and Claude Code renders each output line as its own status
+row:
+
+```sh
+STATUSLINE_LAYOUT=5h,7d,fable,model,session,nl,dir,sid
+```
+
+```
+5h[███42%░░░░]✦⏰25m | 7d[███35%░░░░]⏰8d2h | Opus 5(78.0k/1.0M·8%) | ⏳2h15m
+claude-quota-bar:feat/sid-segment *5 | #3f9a1c2b-7d4e-4a10-9c33-8b21ef0d55aa
+```
+
+That split is 77 / 76 columns where the one-line version was 116 — it fits an
+80-column terminal, and it puts the changing numbers on top and the "where am
+I" identity below. Moving `dir` down has a second benefit: branch names (up to
+25 chars) and the single-dirty-file name (up to 30) are the widest thing on the
+line, so with them on row 2 the quota bars stop sliding sideways every time you
+switch branches.
+
+`nl` is just a token in the layout, so any segment can move and more than one
+break is allowed. A row whose segments all hide produces no blank line — with
+`nl,sid` in a session that ships no id, you get one row, not one row and an
+empty one.
 
 ## Development
 
