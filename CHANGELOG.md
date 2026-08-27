@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.2](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.8.1...v0.8.2) - 2026-08-25
+
+### Other
+
+- repair the segments table and show the two-row layout up front ([#31](https://github.com/xrf9268-hue/claude-quota-bar/pull/31))
+
 ## [0.8.1](https://github.com/xrf9268-hue/claude-quota-bar/compare/v0.8.0...v0.8.1) - 2026-08-25
 
 ### Added
